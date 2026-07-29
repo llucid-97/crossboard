@@ -40,3 +40,12 @@
   identities are a future hardening step.
 - A room can recover while one human retains a snapshot. Cross-device cold
   recovery after everyone leaves would need a small persistence service.
+
+## Quality-of-life follow-up
+
+- [x] Add direct Teams practice with Yellow as the computer teammate.
+- [x] Keep free-for-all practice against three computer rivals.
+- [x] Add synchronized turn rewind with coordinator-serialized online requests.
+- [x] Migrate verified v1 recovery copies into the v2 room protocol.
+- [ ] Publish and verify the controls on GitHub Pages.
+- [ ] Remove the follow-up heartbeat after the live deployment is healthy.

@@ -142,7 +142,13 @@ function search(
     for (const move of moves) {
       value = Math.max(
         value,
-        search(applyMove(state, move), depth - 1, perspective, alpha, beta),
+        search(
+          applyMove(state, move, false),
+          depth - 1,
+          perspective,
+          alpha,
+          beta,
+        ),
       );
       alpha = Math.max(alpha, value);
       if (alpha >= beta) {
@@ -156,7 +162,13 @@ function search(
   for (const move of moves) {
     value = Math.min(
       value,
-      search(applyMove(state, move), depth - 1, perspective, alpha, beta),
+      search(
+        applyMove(state, move, false),
+        depth - 1,
+        perspective,
+        alpha,
+        beta,
+      ),
     );
     beta = Math.min(beta, value);
     if (alpha >= beta) {
@@ -178,7 +190,7 @@ export function chooseComputerMove(
   let bestMove = moves[0];
   let bestScore = -Infinity;
   for (const move of moves) {
-    const next = applyMove(state, move);
+    const next = applyMove(state, move, false);
     const score =
       search(next, 3, color, -Infinity, Infinity) +
       deterministicNoise(`${next.lastActionId}:${color}`) * 0.7;

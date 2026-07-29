@@ -34,6 +34,8 @@ test("server-renders the Crossboard product shell", async () => {
   assert.match(html, /<title>Crossboard — four-player chess, peer to peer<\/title>/i);
   assert.match(html, /Four sides\./i);
   assert.match(html, /Create a room/i);
+  assert.match(html, /Practice teams/i);
+  assert.match(html, /Practice free-for-all/i);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
 });
 

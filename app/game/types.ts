@@ -46,8 +46,19 @@ export interface Seat {
 export type SeatMap = Record<PlayerColor, Seat>;
 export type BoardState = Record<string, Piece>;
 
+export interface UndoFrame {
+  actor: PlayerColor;
+  phase: GamePhase;
+  board: BoardState;
+  turn: PlayerColor;
+  round: number;
+  historyLength: number;
+  eliminated: PlayerColor[];
+  winners: PlayerColor[] | null;
+}
+
 export interface GameState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   ruleset: "crossboard-capture-v1";
   roomCode: string;
   mode: GameMode;
@@ -58,12 +69,17 @@ export interface GameState {
   revision: number;
   round: number;
   history: MoveRecord[];
+  undoStack?: UndoFrame[];
   eliminated: PlayerColor[];
   winners: PlayerColor[] | null;
   lastActionId: string;
   parentHash: string;
   stateHash: string;
-  lineage: Array<{ revision: number; stateHash: string }>;
+  lineage: Array<{
+    revision: number;
+    stateHash: string;
+    lastActionId?: string;
+  }>;
 }
 
 export const COLOR_LABELS: Record<PlayerColor, string> = {

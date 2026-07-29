@@ -13,14 +13,18 @@ import {
   applyMove,
   calculateStateHash,
   createGameState,
+  createPracticeGame,
   describeWinner,
   getLegalMovesForPiece,
+  getUndoActionCount,
+  normalizeGameState,
   passTurn,
   sameSquare,
   squareKey,
   squareName,
   startGame,
   teamOf,
+  undoLastTurn,
   updateLobby,
 } from "../game/engine";
 import {
@@ -30,6 +34,7 @@ import {
   seatPeerId,
   shouldAdoptSnapshot,
   SignalStatus,
+  undoRequesterFor,
   WireMessage,
 } from "../game/network";
 import {
@@ -70,14 +75,6 @@ function normalizeRoomCode(value: string): string {
     .join("-");
 }
 
-function isValidSnapshot(state: GameState): boolean {
-  return (
-    state.schemaVersion === 1 &&
-    state.ruleset === "crossboard-capture-v1" &&
-    calculateStateHash(state) === state.stateHash
-  );
-}
-
 function humanSeatIsPresent(
   color: PlayerColor,
   localColor: PlayerColor,
@@ -98,12 +95,17 @@ function readStoredMatch(): StoredMatch | null {
   }
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
+    const state = normalizeGameState(parsed?.state);
     if (
-      parsed?.state &&
+      state &&
       PLAYER_COLORS.includes(parsed.localColor) &&
-      isValidSnapshot(parsed.state)
+      parsed?.savedAt
     ) {
-      return parsed as StoredMatch;
+      return {
+        state,
+        localColor: parsed.localColor,
+        savedAt: parsed.savedAt,
+      } as StoredMatch;
     }
   } catch {
     return null;
@@ -249,31 +251,42 @@ export function CrossboardApp() {
     });
   }, []);
 
+  const commitState = useCallback(
+    (next: GameState, broadcast = true) => {
+      installState(next);
+      if (broadcast) {
+        broadcastSnapshot(next);
+      }
+    },
+    [broadcastSnapshot, installState],
+  );
+
   const acceptRemoteSnapshot = useCallback(
     (incoming: GameState) => {
-      if (!isValidSnapshot(incoming)) {
+      const normalized = normalizeGameState(incoming);
+      if (!normalized) {
         setNotice("A peer sent an incompatible game copy. It was ignored.");
         return;
       }
       const current = gameRef.current;
       if (!current) {
-        installState(incoming);
+        installState(normalized);
         return;
       }
-      if (incoming.stateHash === current.stateHash) {
+      if (normalized.stateHash === current.stateHash) {
         return;
       }
 
-      if (shouldAdoptSnapshot(current, incoming)) {
+      if (shouldAdoptSnapshot(current, normalized)) {
         const forked =
-          incoming.parentHash !== current.stateHash &&
-          current.parentHash !== incoming.stateHash;
+          normalized.parentHash !== current.stateHash &&
+          current.parentHash !== normalized.stateHash;
         if (forked) {
           setNotice("The room compared two copies and restored one shared position.");
         }
-        installState(incoming);
+        installState(normalized);
         setSelected(null);
-        if (incoming.phase !== "lobby") {
+        if (normalized.phase !== "lobby") {
           setView("game");
         }
       }
@@ -293,6 +306,31 @@ export function CrossboardApp() {
                 sender: mesh.localPeerId,
                 state: current,
               });
+            }
+            return;
+          }
+          if (message.type === "undo-request") {
+            const current = gameRef.current;
+            const requester = current
+              ? undoRequesterFor(
+                  current,
+                  localColorRef.current,
+                  connectedRef.current,
+                  remotePeerId,
+                  message.stateHash,
+                )
+              : null;
+            if (!current || !requester) {
+              return;
+            }
+            const next = undoLastTurn(current);
+            if (next !== current) {
+              commitState(next);
+              setSelected(null);
+              setView("game");
+              setNotice(
+                `${current.seats[requester].name} rewound the last turn.`,
+              );
             }
             return;
           }
@@ -318,7 +356,7 @@ export function CrossboardApp() {
       await mesh.start();
       return mesh;
     },
-    [acceptRemoteSnapshot],
+    [acceptRemoteSnapshot, commitState],
   );
 
   useEffect(() => {
@@ -371,16 +409,6 @@ export function CrossboardApp() {
     game.phase === "playing" &&
     game.seats[game.turn].controller === "computer";
 
-  const commitState = useCallback(
-    (next: GameState, broadcast = true) => {
-      installState(next);
-      if (broadcast) {
-        broadcastSnapshot(next);
-      }
-    },
-    [broadcastSnapshot, installState],
-  );
-
   useEffect(() => {
     if (!game || game.phase !== "playing") {
       return;
@@ -390,14 +418,19 @@ export function CrossboardApp() {
       return;
     }
 
-    const revision = game.revision;
+    const expectedStateHash = game.stateHash;
     const timer = window.setTimeout(() => {
       const current = gameRef.current;
       if (
         !current ||
-        current.revision !== revision ||
+        current.stateHash !== expectedStateHash ||
         current.phase !== "playing" ||
-        current.seats[current.turn].controller !== "computer"
+        current.seats[current.turn].controller !== "computer" ||
+        electCoordinator(
+          current,
+          localColorRef.current,
+          connectedRef.current,
+        ) !== localColorRef.current
       ) {
         return;
       }
@@ -453,8 +486,8 @@ export function CrossboardApp() {
     setJoining(true);
     setNotice("Looking for the room…");
     try {
-      const discovered = await discoverRoom(roomCode);
-      if (!isValidSnapshot(discovered)) {
+      const discovered = normalizeGameState(await discoverRoom(roomCode));
+      if (!discovered) {
         throw new Error("Incompatible room");
       }
       if (discovered.phase !== "lobby") {
@@ -513,20 +546,8 @@ export function CrossboardApp() {
     }
   };
 
-  const startPractice = () => {
-    const initial = createGameState("PRACTICE", "ffa", playerName.trim() || "You");
-    const seats = { ...initial.seats };
-    PLAYER_COLORS.forEach((color) => {
-      if (color !== "red") {
-        seats[color] = {
-          color,
-          controller: "computer",
-          name: `Computer ${COLOR_LABELS[color]}`,
-        };
-      }
-    });
-    const ready = updateLobby(initial, { seats, mode: "ffa" }, "practice");
-    const started = startGame(ready);
+  const startPractice = (mode: GameMode) => {
+    const started = createPracticeGame(mode, playerName.trim() || "You");
     meshRef.current?.close();
     meshRef.current = null;
     localColorRef.current = "red";
@@ -732,10 +753,47 @@ export function CrossboardApp() {
     setSelected(null);
   };
 
+  const undoTurn = () => {
+    const current = gameRef.current;
+    if (!current || !getUndoActionCount(current)) {
+      return;
+    }
+
+    if (isNetworked && coordinator !== localColor) {
+      const mesh = meshRef.current;
+      if (!mesh) {
+        setNotice("The room is reconnecting. Try undo again in a moment.");
+        return;
+      }
+      mesh.sendTo(seatPeerId(current.roomCode, coordinator), {
+        type: "undo-request",
+        sender: mesh.localPeerId,
+        stateHash: current.stateHash,
+      });
+      setNotice("Rewinding the shared turn…");
+      return;
+    }
+
+    const next = undoLastTurn(current);
+    if (next === current) {
+      return;
+    }
+    const undoneMoves = current.history.length - next.history.length;
+    commitState(next);
+    setSelected(null);
+    setView("game");
+    setNotice(
+      undoneMoves > 1
+        ? `Rewound ${undoneMoves} moves, including the computer replies.`
+        : "Rewound the last move.",
+    );
+  };
+
   const legalDestinations = useMemo(
     () => (game && selected ? getLegalMovesForPiece(game, selected) : []),
     [game, selected],
   );
+  const undoActionCount = game ? getUndoActionCount(game) : 0;
 
   const humanCount = game
     ? PLAYER_COLORS.filter(
@@ -796,11 +854,20 @@ export function CrossboardApp() {
                 Create a room <span aria-hidden="true">→</span>
               </button>
               <button
-                className="secondary-button"
+                className="secondary-button practice-button"
                 type="button"
-                onClick={startPractice}
+                onClick={() => startPractice("teams")}
               >
-                Practice vs computers
+                <span>Practice teams</span>
+                <small>You + Yellow vs Blue + Green</small>
+              </button>
+              <button
+                className="secondary-button practice-button"
+                type="button"
+                onClick={() => startPractice("ffa")}
+              >
+                <span>Practice free-for-all</span>
+                <small>Three computer rivals</small>
               </button>
             </div>
             <div className="promise-row" aria-label="Game features">
@@ -957,8 +1024,9 @@ export function CrossboardApp() {
             <p className="eyebrow">Set the table</p>
             <h1>Build your four.</h1>
             <p>
-              Opposite colors are partners in Teams. Computers are ready
-              immediately; open seats wait for an invite.
+              Opposite colors are partners in Teams. Add a computer to your
+              opposite color for an instant teammate; open seats wait for an
+              invite.
             </p>
           </div>
           <div className="mode-switch" aria-label="Game mode">
@@ -1150,6 +1218,28 @@ export function CrossboardApp() {
               const connected =
                 seat.controller !== "human" ||
                 humanSeatIsPresent(color, localColor, connectedColors);
+              const isTeammate =
+                game.mode === "teams" &&
+                teamOf(color) === teamOf(localColor);
+              const playerStatus = game.eliminated.includes(color)
+                ? "King captured"
+                : color === localColor
+                  ? game.mode === "teams"
+                    ? "You · Your team"
+                    : "You"
+                  : seat.controller === "computer"
+                    ? isTeammate
+                      ? "Computer · Your teammate"
+                      : game.mode === "teams"
+                        ? "Computer · Opponent"
+                        : "Computer"
+                    : connected
+                      ? isTeammate
+                        ? "Connected · Your teammate"
+                        : game.mode === "teams"
+                          ? "Connected · Opponent"
+                          : "Connected"
+                      : "Reconnecting";
               return (
                 <div
                   className={`player-chip chip-${color}${
@@ -1162,17 +1252,7 @@ export function CrossboardApp() {
                   </span>
                   <span>
                     <b>{seat.name}</b>
-                    <small>
-                      {game.eliminated.includes(color)
-                        ? "King captured"
-                        : seat.controller === "computer"
-                          ? "Computer"
-                          : color === localColor
-                            ? "You"
-                            : connected
-                              ? "Connected"
-                              : "Reconnecting"}
-                    </small>
+                    <small>{playerStatus}</small>
                   </span>
                 </div>
               );
@@ -1190,9 +1270,26 @@ export function CrossboardApp() {
           </div>
 
           <div className="board-controls">
-            <button type="button" onClick={rotateBoard}>
-              <span aria-hidden="true">↻</span> Rotate board
-            </button>
+            <div className="board-control-actions">
+              <button type="button" onClick={rotateBoard}>
+                <span aria-hidden="true">↻</span> Rotate board
+              </button>
+              <button
+                className="undo-button"
+                type="button"
+                disabled={!undoActionCount}
+                title={
+                  !undoActionCount
+                    ? "Make a move before using undo"
+                    : isNetworked && coordinator !== localColor
+                      ? `Rewind the shared turn through ${game.seats[coordinator].name}`
+                      : "Rewind the latest human move and any computer replies"
+                }
+                onClick={undoTurn}
+              >
+                <span aria-hidden="true">↶</span> Undo turn
+              </button>
+            </div>
             <span>
               Viewing from <b>{COLOR_LABELS[orientation]}</b>
             </span>
