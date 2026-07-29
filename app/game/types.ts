@@ -7,6 +7,7 @@ export type TeamId = "warm" | "cool";
 export type TeamAssignments = Record<PlayerColor, TeamId>;
 export type GamePhase = "lobby" | "playing" | "finished";
 export type SeatController = "human" | "open" | "computer";
+export type PlayerId = string;
 export type ChessPieceType =
   | "pawn"
   | "knight"
@@ -71,6 +72,7 @@ export interface Seat {
   controller: SeatController;
   name: string;
   peerId?: string;
+  playerId?: PlayerId;
 }
 
 export type SeatMap = Record<PlayerColor, Seat>;
@@ -97,7 +99,7 @@ export const DEFAULT_TEAM_ASSIGNMENTS: TeamAssignments = {
 };
 
 export interface GameState {
-  schemaVersion: 3;
+  schemaVersion: 4;
   ruleset: "crossboard-capture-v1" | "crossboard-checkers-v1";
   gameKind: GameKind;
   roomCode: string;
@@ -124,6 +126,14 @@ export interface GameState {
     stateHash: string;
     lastActionId?: string;
   }>;
+}
+
+export const PLAYER_ID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+export const PLAYER_ID_PATTERN =
+  /^CB-[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){3}$/;
+
+export function isPlayerId(value: unknown): value is PlayerId {
+  return typeof value === "string" && PLAYER_ID_PATTERN.test(value);
 }
 
 export const COLOR_LABELS: Record<PlayerColor, string> = {

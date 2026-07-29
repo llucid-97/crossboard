@@ -43,15 +43,17 @@ test("server-renders the Crossboard product shell", async () => {
 });
 
 test("removes the disposable starter and records production metadata", async () => {
-  const [page, layout, packageJson, appSource] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../package.json", import.meta.url), "utf8"),
-    readFile(
-      new URL("../app/components/CrossboardApp.tsx", import.meta.url),
-      "utf8",
-    ),
-  ]);
+  const [page, layout, packageJson, appSource, replicationSource] =
+    await Promise.all([
+      readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../package.json", import.meta.url), "utf8"),
+      readFile(
+        new URL("../app/components/CrossboardApp.tsx", import.meta.url),
+        "utf8",
+      ),
+      readFile(new URL("../app/game/replication.ts", import.meta.url), "utf8"),
+    ]);
 
   assert.match(page, /CrossboardApp/);
   assert.match(layout, /Crossboard — four-player chess and checkers/);
@@ -60,6 +62,10 @@ test("removes the disposable starter and records production metadata", async () 
   assert.match(appSource, /runLobbyCommand\(gameRef/);
   assert.match(appSource, /allowOpenSeats=\{isNetworked\}/);
   assert.match(appSource, /You \+ a computer vs two computers/);
+  assert.match(appSource, /Your refresh recovery code/);
+  assert.match(appSource, /Checking every available recovery chain/);
+  assert.match(replicationSource, /mergeStateChains/);
+  assert.match(replicationSource, /MAX_STATE_CHAIN_ENTRIES = 48/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("app/_sites-preview", projectRoot)));
 });

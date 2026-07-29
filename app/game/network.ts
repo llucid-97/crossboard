@@ -1,17 +1,29 @@
 "use client";
 
 import type { DataConnection, Peer as PeerType } from "peerjs";
-import { GameState, PlayerColor, PLAYER_COLORS } from "./types";
+import {
+  mergeStateChains,
+  normalizeStateChain,
+  StateChain,
+} from "./replication";
+import {
+  GameState,
+  PlayerColor,
+  PLAYER_COLORS,
+  PlayerId,
+  isPlayerId,
+} from "./types";
 
 export type WireMessage =
   | {
       type: "state-request";
       sender: string;
+      playerId: PlayerId;
     }
   | {
-      type: "snapshot";
+      type: "state-chain";
       sender: string;
-      state: GameState;
+      chain: StateChain;
     }
   | {
       type: "ping";
@@ -21,6 +33,7 @@ export type WireMessage =
   | {
       type: "undo-request";
       sender: string;
+      playerId: PlayerId;
       stateHash: string;
     };
 
@@ -33,7 +46,7 @@ export interface MeshCallbacks {
   onNotice: (message: string) => void;
 }
 
-const PEER_PREFIX = "crossboard-v3";
+const PEER_PREFIX = "crossboard-v4";
 
 function cleanRoomCode(roomCode: string): string {
   return roomCode.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -56,9 +69,19 @@ function isWireMessage(value: unknown): value is WireMessage {
   }
   const type = (value as { type?: string }).type;
   if (type === "undo-request") {
-    return typeof (value as { stateHash?: unknown }).stateHash === "string";
+    const request = value as {
+      stateHash?: unknown;
+      playerId?: unknown;
+    };
+    return (
+      typeof request.stateHash === "string" &&
+      isPlayerId(request.playerId)
+    );
   }
-  return type === "state-request" || type === "snapshot" || type === "ping";
+  if (type === "state-request") {
+    return isPlayerId((value as { playerId?: unknown }).playerId);
+  }
+  return type === "state-chain" || type === "ping";
 }
 
 export class PeerMesh {
@@ -69,6 +92,7 @@ export class PeerMesh {
   constructor(
     readonly roomCode: string,
     readonly localColor: PlayerColor,
+    readonly playerId: PlayerId,
     private readonly callbacks: MeshCallbacks,
   ) {}
 
@@ -151,6 +175,7 @@ export class PeerMesh {
         metadata: {
           room: cleanRoomCode(this.roomCode),
           color: this.localColor,
+          playerId: this.playerId,
           role: "player",
         },
         serialization: "json",
@@ -179,6 +204,7 @@ export class PeerMesh {
       this.sendTo(connection.peer, {
         type: "state-request",
         sender: this.localPeerId,
+        playerId: this.playerId,
       });
     };
 
@@ -248,24 +274,30 @@ export class PeerMesh {
 
 export async function discoverRoom(
   roomCode: string,
+  playerId: PlayerId,
   timeoutMs = 7_000,
-): Promise<GameState> {
+): Promise<StateChain> {
   const { Peer } = await import("peerjs");
-  return new Promise<GameState>((resolve, reject) => {
+  return new Promise<StateChain>((resolve, reject) => {
     const peer = new Peer({ debug: 0 });
     const connections: DataConnection[] = [];
     let finished = false;
+    let mergedChain: StateChain | null = null;
+    let settleTimer: number | null = null;
 
-    const finish = (state?: GameState, error?: Error) => {
+    const finish = (chain?: StateChain, error?: Error) => {
       if (finished) {
         return;
       }
       finished = true;
       window.clearTimeout(timeout);
+      if (settleTimer) {
+        window.clearTimeout(settleTimer);
+      }
       connections.forEach((connection) => connection.close());
       peer.destroy();
-      if (state) {
-        resolve(state);
+      if (chain) {
+        resolve(chain);
       } else {
         reject(error ?? new Error("Room not found"));
       }
@@ -291,15 +323,33 @@ export async function discoverRoom(
           void connection.send({
             type: "state-request",
             sender: observerId,
+            playerId,
           } satisfies WireMessage);
         });
         connection.on("data", (data) => {
           if (
             isWireMessage(data) &&
-            data.type === "snapshot" &&
-            data.state.roomCode.toUpperCase() === roomCode.toUpperCase()
+            data.type === "state-chain"
           ) {
-            finish(data.state);
+            const normalized = normalizeStateChain(data.chain);
+            if (
+              !normalized ||
+              normalized.roomCode.toUpperCase() !== roomCode.toUpperCase()
+            ) {
+              return;
+            }
+            mergedChain = mergedChain
+              ? mergeStateChains(mergedChain, normalized)
+              : normalized;
+            if (settleTimer) {
+              window.clearTimeout(settleTimer);
+            }
+            // Give every live seat a short window to answer. This avoids
+            // choosing whichever peer happened to respond first.
+            settleTimer = window.setTimeout(
+              () => finish(mergedChain ?? undefined),
+              650,
+            );
           }
         });
       });
@@ -328,6 +378,19 @@ export function electCoordinator(
   return elected ?? localColor;
 }
 
+export function playerSeatFor(
+  state: GameState,
+  playerId: PlayerId,
+): PlayerColor | null {
+  return (
+    PLAYER_COLORS.find(
+      (color) =>
+        state.seats[color].controller === "human" &&
+        state.seats[color].playerId === playerId,
+    ) ?? null
+  );
+}
+
 export function coordinatorOwnsState(
   state: GameState,
   expectedStateHash: string,
@@ -345,6 +408,7 @@ export function undoRequesterFor(
   localColor: PlayerColor,
   connectedColors: PlayerColor[],
   remotePeerId: string,
+  requesterPlayerId: PlayerId,
   baseStateHash: string,
 ): PlayerColor | null {
   const requester = colorFromPeerId(remotePeerId);
@@ -354,6 +418,7 @@ export function undoRequesterFor(
     !requester ||
     seatPeerId(state.roomCode, requester) !== remotePeerId ||
     state.seats[requester].controller !== "human" ||
+    state.seats[requester].playerId !== requesterPlayerId ||
     electCoordinator(state, localColor, connectedColors) !== localColor
   ) {
     return null;

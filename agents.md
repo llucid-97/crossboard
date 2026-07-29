@@ -4,6 +4,7 @@
 - **Rulesmith** — four-player rules and casual minimax review.
 - **Meshkeeper** — peer-to-peer replication and host-migration review.
 - **Boardlight** — lobby, board experience, accessibility, and QA review.
+- **Gatehouse** — persistent identity, replicated history, rejoin recovery, and browser QA.
 
 The primary agent coordinates all file changes. Review agents return implementation
 notes through the shared Codex task so they do not overwrite one another.
