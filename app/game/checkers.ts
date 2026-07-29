@@ -34,6 +34,8 @@ export const CHECKERS_PRESETS: Record<
     mandatoryCapture: true,
     maximumCapture: false,
     continueAfterCrowning: false,
+    deferredCaptureRemoval: false,
+    deferredPromotion: false,
   },
   international: {
     preset: "international",
@@ -42,6 +44,8 @@ export const CHECKERS_PRESETS: Record<
     mandatoryCapture: true,
     maximumCapture: true,
     continueAfterCrowning: false,
+    deferredCaptureRemoval: true,
+    deferredPromotion: true,
   },
   house: {
     preset: "house",
@@ -50,6 +54,8 @@ export const CHECKERS_PRESETS: Record<
     mandatoryCapture: true,
     maximumCapture: false,
     continueAfterCrowning: true,
+    deferredCaptureRemoval: false,
+    deferredPromotion: false,
   },
 };
 
@@ -278,13 +284,13 @@ function simulateCapture(state: GameState, move: Move): GameState {
   }
   const board: BoardState = { ...state.board };
   delete board[squareKey(move.from)];
-  const isInternational =
-    state.checkersRules.preset === "international";
-  if (!isInternational) {
+  const deferredCaptureRemoval =
+    state.checkersRules.deferredCaptureRemoval;
+  if (!deferredCaptureRemoval) {
     delete board[squareKey(move.capturedSquare)];
   }
   const promoted =
-    !isInternational &&
+    !state.checkersRules.deferredPromotion &&
     movingPiece.type === "man" &&
     isCheckersPromotionSquare(movingPiece.color, move.to);
   board[squareKey(move.to)] = {
@@ -296,7 +302,7 @@ function simulateCapture(state: GameState, move: Move): GameState {
     ...state,
     board,
     continuationFrom: move.to,
-    pendingCapturedSquares: isInternational
+    pendingCapturedSquares: deferredCaptureRemoval
       ? [...state.pendingCapturedSquares, move.capturedSquare]
       : [],
   };

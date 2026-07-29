@@ -29,6 +29,8 @@ export interface CheckersRules {
   mandatoryCapture: boolean;
   maximumCapture: boolean;
   continueAfterCrowning: boolean;
+  deferredCaptureRemoval: boolean;
+  deferredPromotion: boolean;
 }
 
 export interface Coord {
@@ -59,6 +61,7 @@ export interface MoveRecord extends Move {
   captured?: PieceType;
   capturedColor?: PlayerColor;
   eliminated?: PlayerColor;
+  eliminatedColors?: PlayerColor[];
   continued?: boolean;
   notation: string;
 }

@@ -54,7 +54,9 @@ capture can never jump or remove a teammate.
 
 The International preset defers captured-piece removal until a complete jump
 sequence ends and only activates a new king after that turn, matching the FMJD
-multiple-capture rules. House rules can still crown and continue immediately.
+multiple-capture rules. Those timing mechanics remain attached when another
+International option is customized. House rules can still crown and continue
+immediately.
 
 ## How rooms stay online
 

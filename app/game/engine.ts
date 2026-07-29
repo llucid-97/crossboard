@@ -1,6 +1,7 @@
 import {
   BoardState,
   ChessPieceType,
+  CheckersRules,
   COLOR_LABELS,
   Coord,
   DEFAULT_TEAM_ASSIGNMENTS,
@@ -538,6 +539,7 @@ function applyChessMove(
     captured: captured?.type,
     capturedColor: captured?.color,
     eliminated: eliminatedColor,
+    eliminatedColors: eliminatedColor ? [eliminatedColor] : undefined,
     notation,
     promotion: promoted ? "queen" : undefined,
   };
@@ -594,17 +596,18 @@ function applyCheckersMove(
   const board: BoardState = { ...state.board };
   delete board[squareKey(move.from)];
 
-  const isInternational =
-    state.checkersRules.preset === "international";
+  const deferredCaptureRemoval =
+    state.checkersRules.deferredCaptureRemoval;
+  const deferredPromotion = state.checkersRules.deferredPromotion;
   const captured = move.capturedSquare
     ? board[squareKey(move.capturedSquare)]
     : undefined;
-  if (move.capturedSquare && !isInternational) {
+  if (move.capturedSquare && !deferredCaptureRemoval) {
     delete board[squareKey(move.capturedSquare)];
   }
 
   const immediatelyPromoted =
-    !isInternational &&
+    !deferredPromotion &&
     movingPiece.type === "man" &&
     isCheckersPromotionSquare(movingPiece.color, move.to);
   board[squareKey(move.to)] = {
@@ -614,7 +617,7 @@ function applyCheckersMove(
   };
 
   const pendingCapturedSquares =
-    isInternational && move.capturedSquare
+    deferredCaptureRemoval && move.capturedSquare
       ? [...state.pendingCapturedSquares, move.capturedSquare]
       : [];
   const canContinueAfterPromotion =
@@ -631,12 +634,15 @@ function applyCheckersMove(
       : [];
   const continued = continuationMoves.length > 0;
 
-  if (isInternational && !continued) {
-    pendingCapturedSquares.forEach((square) => {
-      delete board[squareKey(square)];
-    });
+  if (!continued) {
+    if (deferredCaptureRemoval) {
+      pendingCapturedSquares.forEach((square) => {
+        delete board[squareKey(square)];
+      });
+    }
     const pieceAtDestination = board[squareKey(move.to)];
     if (
+      deferredPromotion &&
       pieceAtDestination?.type === "man" &&
       isCheckersPromotionSquare(pieceAtDestination.color, move.to)
     ) {
@@ -661,6 +667,9 @@ function applyCheckersMove(
       }
     }
   }
+  const eliminatedColors = eliminated.filter(
+    (color) => !state.eliminated.includes(color),
+  );
   const eliminatedColor =
     captured &&
     eliminated.includes(captured.color) &&
@@ -691,6 +700,9 @@ function applyCheckersMove(
     captured: captured?.type,
     capturedColor: captured?.color,
     eliminated: eliminatedColor,
+    eliminatedColors: eliminatedColors.length
+      ? eliminatedColors
+      : undefined,
     continued,
     notation,
     promotion: promoted ? "crowned" : undefined,
@@ -975,6 +987,7 @@ function stableStatePayload(state: GameState): string {
       move.to.col,
       move.captured ?? "",
       move.eliminated ?? "",
+      move.eliminatedColors ?? [],
       move.capturedColor ?? "",
       move.capturedSquare?.row ?? "",
       move.capturedSquare?.col ?? "",
@@ -1037,6 +1050,28 @@ export function calculateStateHash(state: GameState): string {
     .padStart(8, "0")}`;
 }
 
+function hasCurrentCheckersRules(value: unknown): value is CheckersRules {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const rules = value as Record<string, unknown>;
+  return (
+    typeof rules.preset === "string" &&
+    ["american", "international", "house", "custom"].includes(
+      rules.preset,
+    ) &&
+    [
+      "flyingKings",
+      "backwardCaptures",
+      "mandatoryCapture",
+      "maximumCapture",
+      "continueAfterCrowning",
+      "deferredCaptureRemoval",
+      "deferredPromotion",
+    ].every((field) => typeof rules[field] === "boolean")
+  );
+}
+
 export function normalizeGameState(value: unknown): GameState | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -1062,8 +1097,7 @@ export function normalizeGameState(value: unknown): GameState | null {
         candidate.ruleset !== "crossboard-checkers-v1") ||
       !candidate.teamAssignments ||
       typeof candidate.teamAssignments !== "object" ||
-      !candidate.checkersRules ||
-      typeof candidate.checkersRules !== "object" ||
+      !hasCurrentCheckersRules(candidate.checkersRules) ||
       !Array.isArray(candidate.pendingCapturedSquares) ||
       !Array.isArray(candidate.undoStack) ||
       !(candidate.undoStack as unknown[]).every(

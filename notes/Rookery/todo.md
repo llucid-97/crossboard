@@ -66,4 +66,9 @@
 - [x] Teach minimax to search through no-move elimination.
 - [x] Add migration, undo, timer, lobby-race, International-rules, tactical-AI,
   and full hash-contract regressions.
+- [x] Preserve International capture and promotion timing when visible options
+  turn the preset into Custom.
+- [x] Record every color eliminated by a deferred multi-capture chain.
+- [x] Keep the local recommended checkers setup startable and hide controls
+  that would create unfillable open seats without a mesh.
 - [x] Pass worker build/tests, GitHub Pages export, TypeScript, and lint.

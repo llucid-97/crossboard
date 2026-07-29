@@ -42,7 +42,10 @@ import {
   undoRequesterFor,
   WireMessage,
 } from "../game/network";
-import { runLobbyCommand } from "../game/lobby";
+import {
+  configureFriendsVsComputers,
+  runLobbyCommand,
+} from "../game/lobby";
 import {
   COLOR_LABELS,
   COLOR_SYMBOLS,
@@ -145,6 +148,7 @@ interface SeatCardProps {
   connectedColors: PlayerColor[];
   active: boolean;
   canManage: boolean;
+  allowOpenSeats: boolean;
   onChangeController: (color: PlayerColor, controller: SeatController) => void;
   onChangeTeam: (color: PlayerColor, team: TeamId) => void;
 }
@@ -156,6 +160,7 @@ function SeatCard({
   connectedColors,
   active,
   canManage,
+  allowOpenSeats,
   onChangeController,
   onChangeTeam,
 }: SeatCardProps) {
@@ -231,7 +236,10 @@ function SeatCard({
           ))}
         </div>
       ) : null}
-      {canManage && color !== localColor && seat.controller !== "human" ? (
+      {canManage &&
+      color !== localColor &&
+      seat.controller !== "human" &&
+      (allowOpenSeats || seat.controller === "open") ? (
         <button
           className="text-button"
           type="button"
@@ -823,7 +831,11 @@ export function CrossboardApp() {
     commitLobbyMutation((current) => {
       const local = localColorRef.current;
       const seat = current.seats[color];
-      if (color === local || seat.controller === "human") {
+      if (
+        color === local ||
+        seat.controller === "human" ||
+        (!isNetworked && controller === "open")
+      ) {
         return current;
       }
       const seats = {
@@ -846,42 +858,13 @@ export function CrossboardApp() {
   };
 
   const applyFriendsVsComputersPreset = () => {
-    commitLobbyMutation((current) => {
-      const local = localColorRef.current;
-      const opposite =
-        local === "red"
-          ? "yellow"
-          : local === "yellow"
-            ? "red"
-            : local === "blue"
-              ? "green"
-              : "blue";
-      const seats = { ...current.seats };
-      const localTeam = teamOf(local, current.teamAssignments);
-      const otherTeam: TeamId = localTeam === "warm" ? "cool" : "warm";
-      const teamAssignments = { ...current.teamAssignments };
-      PLAYER_COLORS.forEach((color) => {
-        teamAssignments[color] =
-          color === local || color === opposite ? localTeam : otherTeam;
-        if (color === local || seats[color].controller === "human") {
-          return;
-        }
-        const controller = color === opposite ? "open" : "computer";
-        seats[color] = {
-          color,
-          controller,
-          name:
-            controller === "open"
-              ? "Open seat"
-              : `Computer ${COLOR_LABELS[color]}`,
-        };
-      });
-      return updateLobby(
+    commitLobbyMutation((current) =>
+      configureFriendsVsComputers(
         current,
-        { mode: "teams", seats, teamAssignments },
-        "preset-friends-v-computers",
-      );
-    });
+        localColorRef.current,
+        isNetworked,
+      ),
+    );
   };
 
   const beginGame = () => {
@@ -1403,6 +1386,7 @@ export function CrossboardApp() {
                 connectedColors={connectedColors}
                 active={false}
                 canManage={isCoordinator}
+                allowOpenSeats={isNetworked}
                 onChangeController={changeSeatController}
                 onChangeTeam={changeTeamAssignment}
               />
@@ -1415,6 +1399,7 @@ export function CrossboardApp() {
                 connectedColors={connectedColors}
                 active={false}
                 canManage={isCoordinator}
+                allowOpenSeats={isNetworked}
                 onChangeController={changeSeatController}
                 onChangeTeam={changeTeamAssignment}
               />
@@ -1445,6 +1430,7 @@ export function CrossboardApp() {
                 connectedColors={connectedColors}
                 active={false}
                 canManage={isCoordinator}
+                allowOpenSeats={isNetworked}
                 onChangeController={changeSeatController}
                 onChangeTeam={changeTeamAssignment}
               />
@@ -1457,6 +1443,7 @@ export function CrossboardApp() {
                 connectedColors={connectedColors}
                 active={false}
                 canManage={isCoordinator}
+                allowOpenSeats={isNetworked}
                 onChangeController={changeSeatController}
                 onChangeTeam={changeTeamAssignment}
               />
@@ -1535,7 +1522,9 @@ export function CrossboardApp() {
                         disabled={
                           !isCoordinator ||
                           (rule === "maximumCapture" &&
-                            !game.checkersRules.mandatoryCapture)
+                            !game.checkersRules.mandatoryCapture) ||
+                          (rule === "continueAfterCrowning" &&
+                            game.checkersRules.deferredPromotion)
                         }
                         onChange={(event) =>
                           changeCheckersRule(rule, event.target.checked)
@@ -1548,27 +1537,46 @@ export function CrossboardApp() {
                     </label>
                   ))}
                 </div>
+                <div className="sequence-timing-note">
+                  <strong>Sequence timing</strong>
+                  <span>
+                    Captures{" "}
+                    {game.checkersRules.deferredCaptureRemoval
+                      ? "leave the board after the full chain"
+                      : "leave the board after each jump"}
+                    ; promotion{" "}
+                    {game.checkersRules.deferredPromotion
+                      ? "activates when the turn ends"
+                      : "activates on reaching the far edge"}.
+                  </span>
+                </div>
               </section>
             ) : null}
             <div className="health-card">
               <div className="health-icon" aria-hidden="true">⟲</div>
               <div>
-                <span>Room continuity</span>
+                <span>
+                  {isNetworked ? "Room continuity" : "Local practice"}
+                </span>
                 <strong>
-                  {isCoordinator
-                    ? "You’re keeping the room running"
-                    : `${game.seats[coordinator].name} is coordinating`}
+                  {isNetworked
+                    ? isCoordinator
+                      ? "You’re keeping the room running"
+                      : `${game.seats[coordinator].name} is coordinating`
+                    : "Computers run in this browser"}
                 </strong>
               </div>
             </div>
-            <details className="plain-details">
-              <summary>How this room stays open</summary>
-              <p>
-                Everyone keeps the current game. If the coordinator disconnects,
-                another connected human takes over. Rejoining players catch up
-                from the others.
-              </p>
-            </details>
+            {isNetworked ? (
+              <details className="plain-details">
+                <summary>How this room stays open</summary>
+                <p>
+                  Everyone keeps the current game. If the coordinator
+                  disconnects, another connected human takes over. Rejoining
+                  players catch up from the others.
+                </p>
+              </details>
+            ) : null}
             {isCoordinator ? (
               <button
                 className="preset-button"
@@ -1576,7 +1584,11 @@ export function CrossboardApp() {
                 onClick={applyFriendsVsComputersPreset}
               >
                 <span>Recommended setup</span>
-                <b>Two friends vs two computers</b>
+                <b>
+                  {isNetworked
+                    ? "Two friends vs two computers"
+                    : "You + a computer vs two computers"}
+                </b>
               </button>
             ) : null}
             <div className="lobby-actions">
@@ -1807,13 +1819,19 @@ export function CrossboardApp() {
                       game.mode,
                       game.teamAssignments,
                     );
-                    const eliminatedAppearance = move.eliminated
-                      ? playerAppearance(
-                          move.eliminated,
-                          game.mode,
-                          game.teamAssignments,
-                        )
-                      : null;
+                    const eliminatedColors =
+                      move.eliminatedColors ??
+                      (move.eliminated ? [move.eliminated] : []);
+                    const eliminatedLabels = eliminatedColors
+                      .map(
+                        (color) =>
+                          playerAppearance(
+                            color,
+                            game.mode,
+                            game.teamAssignments,
+                          ).label,
+                      )
+                      .join(" + ");
                     return (
                       <div
                         className={`history-row${index === 0 ? " latest" : ""}`}
@@ -1830,8 +1848,8 @@ export function CrossboardApp() {
                           </b>
                           <span>
                             {move.notation}
-                            {eliminatedAppearance
-                              ? ` · ${eliminatedAppearance.label} eliminated`
+                            {eliminatedLabels
+                              ? ` · ${eliminatedLabels} eliminated`
                               : ""}
                           </span>
                         </div>
@@ -1897,10 +1915,15 @@ export function CrossboardApp() {
                 <li>
                   A color is out when it has no pieces or no legal move.
                 </li>
-                {game.checkersRules.preset === "international" ? (
+                {game.checkersRules.deferredCaptureRemoval ||
+                game.checkersRules.deferredPromotion ? (
                   <li>
-                    Captured pieces stay as blockers until the jump sequence
-                    ends; a new king activates on the following turn.
+                    {game.checkersRules.deferredCaptureRemoval
+                      ? "Captured pieces stay as blockers until the jump sequence ends. "
+                      : ""}
+                    {game.checkersRules.deferredPromotion
+                      ? "A new king activates after that turn."
+                      : ""}
                   </li>
                 ) : null}
               </ul>

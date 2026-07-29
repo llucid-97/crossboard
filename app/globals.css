@@ -1667,6 +1667,21 @@ button:disabled {
   display: grid;
 }
 
+.sequence-timing-note {
+  display: grid;
+  gap: 3px;
+  border-top: 1px solid var(--line);
+  padding-top: 11px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.sequence-timing-note strong {
+  color: var(--ink);
+  font-size: 10px;
+}
+
 .rule-toggle {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

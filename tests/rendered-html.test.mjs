@@ -58,6 +58,8 @@ test("removes the disposable starter and records production metadata", async () 
   assert.match(packageJson, /"peerjs"/);
   assert.match(appSource, /Undo turn/);
   assert.match(appSource, /runLobbyCommand\(gameRef/);
+  assert.match(appSource, /allowOpenSeats=\{isNetworked\}/);
+  assert.match(appSource, /You \+ a computer vs two computers/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("app/_sites-preview", projectRoot)));
 });

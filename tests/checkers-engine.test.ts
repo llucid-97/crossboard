@@ -472,6 +472,73 @@ test("International men do not gain flying-king movement during a capture", () =
   assert.equal(finished.continuationFrom, null);
 });
 
+test("customizing International keeps its sequence timing mechanics", () => {
+  const customizedRules = {
+    ...checkersRulesForPreset("international"),
+    preset: "custom" as const,
+    maximumCapture: false,
+  };
+  const reverseRoute: GameState = {
+    ...position("ffa", {
+      "8,3": checker("red", "red-king", "crowned"),
+      "6,5": checker("blue", "blue"),
+      "9,2": checker("green", "green"),
+      "0,9": checker("yellow", "yellow"),
+    }),
+    checkersRules: customizedRules,
+  };
+  const afterCapture = applyMove(reverseRoute, {
+    from: { row: 8, col: 3 },
+    to: { row: 5, col: 6 },
+  });
+  assert.equal(customizedRules.deferredCaptureRemoval, true);
+  assert.equal(afterCapture.continuationFrom, null);
+  assert.ok(afterCapture.board["9,2"]);
+
+  const promotionRoute: GameState = {
+    ...position("ffa", {
+      "2,3": checker("red", "red"),
+      "1,4": checker("blue", "blue"),
+      "1,6": checker("green", "green"),
+      "0,9": checker("yellow", "yellow"),
+    }),
+    checkersRules: customizedRules,
+  };
+  const midChain = applyMove(promotionRoute, {
+    from: { row: 2, col: 3 },
+    to: { row: 0, col: 5 },
+  });
+  assert.equal(customizedRules.deferredPromotion, true);
+  assert.equal(midChain.board["0,5"].type, "man");
+  assert.deepEqual(midChain.continuationFrom, { row: 0, col: 5 });
+});
+
+test("International history records every color eliminated at chain end", () => {
+  const state: GameState = {
+    ...position("ffa", {
+      "8,3": checker("red", "red"),
+      "7,4": checker("blue", "last-blue"),
+      "5,6": checker("green", "last-green"),
+      "0,9": checker("yellow", "yellow"),
+    }),
+    checkersRules: checkersRulesForPreset("international"),
+  };
+  const first = applyMove(state, {
+    from: { row: 8, col: 3 },
+    to: { row: 6, col: 5 },
+  });
+  assert.equal(first.history.at(-1)?.eliminatedColors, undefined);
+  const finished = applyMove(first, {
+    from: { row: 6, col: 5 },
+    to: { row: 4, col: 7 },
+  });
+  assert.deepEqual(finished.eliminated, ["blue", "green"]);
+  assert.deepEqual(
+    finished.history.at(-1)?.eliminatedColors,
+    ["blue", "green"],
+  );
+});
+
 test("flying kings may land on any clear square beyond one opponent", () => {
   const state = position("ffa", {
     "8,3": checker("red", "red-king", "crowned"),
@@ -656,6 +723,8 @@ test("schema v3 hashes every replicated checkers and move-history field", () => 
     "mandatoryCapture",
     "maximumCapture",
     "continueAfterCrowning",
+    "deferredCaptureRemoval",
+    "deferredPromotion",
   ] as const) {
     variants.push({
       ...played,
@@ -678,6 +747,10 @@ test("schema v3 hashes every replicated checkers and move-history field", () => 
     { ...record, captured: "crowned" as const },
     { ...record, capturedColor: "green" as const },
     { ...record, eliminated: "green" as const },
+    {
+      ...record,
+      eliminatedColors: ["blue" as const, "green" as const],
+    },
     {
       ...record,
       capturedSquare: {

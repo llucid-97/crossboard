@@ -19,7 +19,10 @@ import {
   updateLobby,
   undoLastTurn,
 } from "../app/game/engine";
-import { runLobbyCommand } from "../app/game/lobby";
+import {
+  configureFriendsVsComputers,
+  runLobbyCommand,
+} from "../app/game/lobby";
 import {
   coordinatorOwnsState,
   electCoordinator,
@@ -114,6 +117,26 @@ test("chess practice starts directly in teams or free-for-all", () => {
   for (const color of ["blue", "yellow", "green"] as const) {
     assert.equal(freeForAll.seats[color].controller, "computer");
   }
+});
+
+test("the friends preset opens an invite online but stays startable locally", () => {
+  const base = createGameState(
+    "TEST-PRESET-SCOPE",
+    "ffa",
+    "Player",
+    "checkers",
+  );
+  const local = configureFriendsVsComputers(base, "red", false);
+  for (const color of ["blue", "yellow", "green"] as const) {
+    assert.equal(local.seats[color].controller, "computer");
+  }
+  assert.equal(startGame(local).phase, "playing");
+
+  const networked = configureFriendsVsComputers(base, "red", true);
+  assert.equal(networked.seats.yellow.controller, "open");
+  assert.equal(networked.seats.blue.controller, "computer");
+  assert.equal(networked.seats.green.controller, "computer");
+  assert.equal(startGame(networked).phase, "lobby");
 });
 
 test("pawns move one or two squares and promote on the rank-eleven line", () => {
@@ -260,6 +283,11 @@ test("verified v1 and v2 chess recovery copies migrate to schema v3", () => {
     assert.equal(migrated.gameKind, "chess");
     assert.deepEqual(migrated.undoStack, []);
     assert.deepEqual(migrated.pendingCapturedSquares, []);
+    assert.equal(
+      migrated.checkersRules.deferredCaptureRemoval,
+      false,
+    );
+    assert.equal(migrated.checkersRules.deferredPromotion, false);
     assert.equal(migrated.revision, legacy.revision + 1);
     assert.equal(migrated.parentHash, legacy.stateHash);
     assert.equal(calculateStateHash(migrated), migrated.stateHash);
