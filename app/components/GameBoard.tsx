@@ -5,17 +5,18 @@ import {
   BOARD_SIZE,
   getLegalMovesForPiece,
   isPlayableSquare,
+  playerAppearance,
   sameSquare,
   squareKey,
   squareName,
 } from "../game/engine";
 import {
-  COLOR_LABELS,
   Coord,
   GameState,
   PIECE_GLYPHS,
   PIECE_LABELS,
   PlayerColor,
+  POSITION_LABELS,
 } from "../game/types";
 
 interface GameBoardProps {
@@ -111,7 +112,7 @@ export function GameBoard({
     <div
       className="game-board"
       role="grid"
-      aria-label={`Crossboard game board, oriented for ${COLOR_LABELS[orientation]}`}
+      aria-label={`Crossboard game board, oriented from ${POSITION_LABELS[orientation]}`}
     >
       {Array.from({ length: BOARD_SIZE * BOARD_SIZE }, (_, index) => {
         const displayRow = Math.floor(index / BOARD_SIZE);
@@ -133,8 +134,15 @@ export function GameBoard({
         const latest =
           !!lastMove &&
           (sameSquare(lastMove.from, coord) || sameSquare(lastMove.to, coord));
+        const appearance = piece
+          ? playerAppearance(
+              piece.color,
+              game.mode,
+              game.teamAssignments,
+            )
+          : null;
         const label = piece
-          ? `${COLOR_LABELS[piece.color]} ${PIECE_LABELS[piece.type]} on ${squareName(coord)}`
+          ? `${appearance?.label} ${PIECE_LABELS[piece.type]} on ${squareName(coord)}`
           : `Empty ${squareName(coord)}`;
         const classes = [
           "board-square",
@@ -164,7 +172,7 @@ export function GameBoard({
           >
             {piece && (piece.type === "man" || piece.type === "crowned") ? (
               <span
-                className={`checker-piece piece-${piece.color}${
+                className={`checker-piece piece-${piece.color} ${appearance?.paletteClass}${
                   piece.type === "crowned" ? " is-crowned" : ""
                 }`}
                 aria-hidden="true"
@@ -173,7 +181,7 @@ export function GameBoard({
               </span>
             ) : piece ? (
               <span
-                className={`chess-piece piece-${piece.color}`}
+                className={`chess-piece piece-${piece.color} ${appearance?.paletteClass}`}
                 aria-hidden="true"
               >
                 {PIECE_GLYPHS[piece.type]}

@@ -18,6 +18,7 @@ import {
   getAllLegalMoves,
   getLegalMovesForPiece,
   passTurn,
+  playerAppearance,
   sameSquare,
   squareKey,
   squareName,
@@ -47,7 +48,10 @@ import {
   PIECE_LABELS,
   PlayerColor,
   PLAYER_COLORS,
+  POSITION_LABELS,
   SeatController,
+  TeamId,
+  TEAM_LABELS,
 } from "../game/types";
 import { GameBoard } from "./GameBoard";
 
@@ -93,6 +97,19 @@ function humanSeatIsPresent(
   return color === localColor || connectedColors.includes(color);
 }
 
+function displaySeatName(game: GameState, color: PlayerColor): string {
+  const seat = game.seats[color];
+  if (seat.controller !== "computer") {
+    return seat.name;
+  }
+  const appearance = playerAppearance(
+    color,
+    game.mode,
+    game.teamAssignments,
+  );
+  return `Computer ${appearance.label}`;
+}
+
 interface StoredMatch {
   state: GameState;
   localColor: PlayerColor;
@@ -126,6 +143,7 @@ interface SeatCardProps {
   active: boolean;
   canManage: boolean;
   onChangeController: (color: PlayerColor, controller: SeatController) => void;
+  onChangeTeam: (color: PlayerColor, team: TeamId) => void;
 }
 
 function SeatCard({
@@ -136,30 +154,40 @@ function SeatCard({
   active,
   canManage,
   onChangeController,
+  onChangeTeam,
 }: SeatCardProps) {
   const seat = game.seats[color];
+  const appearance = playerAppearance(
+    color,
+    game.mode,
+    game.teamAssignments,
+  );
   const isLocal = color === localColor && seat.controller === "human";
   const connected =
     seat.controller !== "human" ||
     humanSeatIsPresent(color, localColor, connectedColors);
   const team =
-    game.mode === "teams" ? ` · Team ${teamOf(color)}` : "";
+    appearance.team === null ? null : TEAM_LABELS[appearance.team];
+  const seatName = displaySeatName(game, color);
 
   return (
     <article
       className={`seat-card seat-${color}${active ? " is-active" : ""}`}
-      aria-label={`${COLOR_LABELS[color]} seat`}
+      aria-label={`${POSITION_LABELS[color]} seat`}
     >
       <div className="seat-heading">
-        <span className={`color-token token-${color}`} aria-hidden="true">
+        <span
+          className={`color-token token-${color} ${appearance.paletteClass}`}
+          aria-hidden="true"
+        >
           {COLOR_SYMBOLS[color]}
         </span>
         <div>
           <strong>
-            {COLOR_LABELS[color]}
-            {team}
+            {POSITION_LABELS[color]} · {appearance.label}
           </strong>
           <span>
+            {team ? `${team} team · ` : ""}
             {seat.controller === "computer"
               ? "Computer · Casual"
               : seat.controller === "open"
@@ -172,7 +200,34 @@ function SeatCard({
           </span>
         </div>
       </div>
-      <div className="seat-name">{seat.name}</div>
+      <div className="seat-name">{seatName}</div>
+      {game.mode === "teams" ? (
+        <div
+          className="team-picker"
+          role="group"
+          aria-label={`${POSITION_LABELS[color]} team`}
+        >
+          {(["warm", "cool"] as const).map((candidate) => (
+            <button
+              type="button"
+              className={
+                teamOf(color, game.teamAssignments) === candidate
+                  ? `active team-${candidate}`
+                  : `team-${candidate}`
+              }
+              aria-pressed={
+                teamOf(color, game.teamAssignments) === candidate
+              }
+              disabled={!canManage}
+              onClick={() => onChangeTeam(color, candidate)}
+              key={candidate}
+            >
+              <span aria-hidden="true" />
+              {TEAM_LABELS[candidate]}
+            </button>
+          ))}
+        </div>
+      ) : null}
       {canManage && color !== localColor && seat.controller !== "human" ? (
         <button
           className="text-button"
@@ -634,6 +689,35 @@ export function CrossboardApp() {
     commitState(updateLobby(game, { mode }, `mode-${mode}`));
   };
 
+  const changeTeamAssignment = (color: PlayerColor, team: TeamId) => {
+    if (!game || coordinator !== localColor || game.mode !== "teams") {
+      return;
+    }
+    const currentTeam = teamOf(color, game.teamAssignments);
+    if (currentTeam === team) {
+      return;
+    }
+    const currentTeamSize = PLAYER_COLORS.filter(
+      (candidate) =>
+        teamOf(candidate, game.teamAssignments) === currentTeam,
+    ).length;
+    if (currentTeamSize <= 1) {
+      setNotice("Each side needs at least one seat.");
+      return;
+    }
+    const teamAssignments = {
+      ...game.teamAssignments,
+      [color]: team,
+    };
+    commitState(
+      updateLobby(
+        game,
+        { teamAssignments },
+        `team-${color}-${team}`,
+      ),
+    );
+  };
+
   const changeCheckersPreset = (
     preset: Exclude<CheckersPreset, "custom">,
   ) => {
@@ -711,7 +795,12 @@ export function CrossboardApp() {
             ? "green"
             : "blue";
     const seats = { ...game.seats };
+    const localTeam = teamOf(localColor, game.teamAssignments);
+    const otherTeam: TeamId = localTeam === "warm" ? "cool" : "warm";
+    const teamAssignments = { ...game.teamAssignments };
     PLAYER_COLORS.forEach((color) => {
+      teamAssignments[color] =
+        color === localColor || color === opposite ? localTeam : otherTeam;
       if (color === localColor || seats[color].controller === "human") {
         return;
       }
@@ -728,7 +817,7 @@ export function CrossboardApp() {
     commitState(
       updateLobby(
         game,
-        { mode: "teams", seats },
+        { mode: "teams", seats, teamAssignments },
         "preset-friends-v-computers",
       ),
     );
@@ -746,11 +835,20 @@ export function CrossboardApp() {
         game.seats[color].controller === "human" &&
         !humanSeatIsPresent(color, localColor, connectedColors),
     );
-    if (hasOpenSeat || missingHuman) {
+    const hasInvalidTeams =
+      game.mode === "teams" &&
+      new Set(
+        PLAYER_COLORS.map((color) =>
+          teamOf(color, game.teamAssignments),
+        ),
+      ).size < 2;
+    if (hasOpenSeat || missingHuman || hasInvalidTeams) {
       setNotice(
         hasOpenSeat
           ? "Fill all four seats before starting."
-          : "A human player is still reconnecting.",
+          : missingHuman
+            ? "A human player is still reconnecting."
+            : "Put at least one seat on each team.",
       );
       return;
     }
@@ -904,8 +1002,9 @@ export function CrossboardApp() {
               <em>game.</em>
             </h1>
             <p className="hero-lede">
-              Chess or checkers, every color for themselves or opposite-seat
-              teams. Add casual computer opponents, invite friends, and keep
+              Chess or checkers, every color for themselves or custom
+              Warm-versus-Cool teams. Add casual computer opponents, invite
+              friends, and keep
               playing when the room creator drops.
             </p>
             <div className="game-menu" aria-label="Choose a game">
@@ -1072,8 +1171,8 @@ export function CrossboardApp() {
             <span>✣</span>
             <h2>Teams or free-for-all</h2>
             <p>
-              Opposite colors can cooperate against the other pair, with casual
-              computer players ready for any empty seat.
+              Assign each seat to the Warm or Cool team, with casual computer
+              players ready for any empty seat.
             </p>
           </article>
         </section>
@@ -1097,6 +1196,12 @@ export function CrossboardApp() {
         game.seats[color].controller === "human" &&
         !humanSeatIsPresent(color, localColor, connectedColors),
     );
+    const warmCount = PLAYER_COLORS.filter(
+      (color) => teamOf(color, game.teamAssignments) === "warm",
+    ).length;
+    const coolCount = PLAYER_COLORS.length - warmCount;
+    const hasInvalidTeams =
+      game.mode === "teams" && (warmCount === 0 || coolCount === 0);
 
     return (
       <main className="site-shell lobby-shell">
@@ -1127,29 +1232,37 @@ export function CrossboardApp() {
             </p>
             <h1>Build your four.</h1>
             <p>
-              Opposite colors are partners in Teams
-              {isCheckers ? " and can’t capture each other" : ""}. Computers
-              are ready immediately; open seats wait for an invite.
+              Assign every seat to Warm or Cool in Teams
+              {isCheckers ? "; teammates can’t capture each other" : ""}.
+              Computers are ready immediately; open seats wait for an invite.
             </p>
           </div>
-          <div className="mode-switch" aria-label="Game mode">
-            <button
-              type="button"
-              className={game.mode === "teams" ? "active" : ""}
-              disabled={!isCoordinator}
-              onClick={() => changeMode("teams")}
-            >
-              Teams <small>2 vs 2</small>
-            </button>
-            <button
-              type="button"
-              className={game.mode === "ffa" ? "active" : ""}
-              disabled={!isCoordinator}
-              onClick={() => changeMode("ffa")}
-            >
-              Free-for-all{" "}
-              <small>{isCheckers ? "Last color" : "Last king"}</small>
-            </button>
+          <div className="lobby-mode-panel">
+            <div className="mode-switch" aria-label="Game mode">
+              <button
+                type="button"
+                className={game.mode === "teams" ? "active" : ""}
+                disabled={!isCoordinator}
+                onClick={() => changeMode("teams")}
+              >
+                Teams <small>Choose sides</small>
+              </button>
+              <button
+                type="button"
+                className={game.mode === "ffa" ? "active" : ""}
+                disabled={!isCoordinator}
+                onClick={() => changeMode("ffa")}
+              >
+                Free-for-all{" "}
+                <small>{isCheckers ? "Last color" : "Last king"}</small>
+              </button>
+            </div>
+            {game.mode === "teams" ? (
+              <p className="team-counts" aria-label="Team sizes">
+                <span className="warm-count">Warm {warmCount}</span>
+                <span className="cool-count">Cool {coolCount}</span>
+              </p>
+            ) : null}
           </div>
         </section>
 
@@ -1164,6 +1277,7 @@ export function CrossboardApp() {
                 active={false}
                 canManage={isCoordinator}
                 onChangeController={changeSeatController}
+                onChangeTeam={changeTeamAssignment}
               />
             </div>
             <div className="west-seat">
@@ -1175,6 +1289,7 @@ export function CrossboardApp() {
                 active={false}
                 canManage={isCoordinator}
                 onChangeController={changeSeatController}
+                onChangeTeam={changeTeamAssignment}
               />
             </div>
             <div
@@ -1204,6 +1319,7 @@ export function CrossboardApp() {
                 active={false}
                 canManage={isCoordinator}
                 onChangeController={changeSeatController}
+                onChangeTeam={changeTeamAssignment}
               />
             </div>
             <div className="south-seat">
@@ -1215,6 +1331,7 @@ export function CrossboardApp() {
                 active={false}
                 canManage={isCoordinator}
                 onChangeController={changeSeatController}
+                onChangeTeam={changeTeamAssignment}
               />
             </div>
           </div>
@@ -1339,7 +1456,12 @@ export function CrossboardApp() {
               <button
                 className="primary-button"
                 type="button"
-                disabled={!isCoordinator || hasOpen || hasMissingHuman}
+                disabled={
+                  !isCoordinator ||
+                  hasOpen ||
+                  hasMissingHuman ||
+                  hasInvalidTeams
+                }
                 onClick={beginGame}
               >
                 Start game <span aria-hidden="true">→</span>
@@ -1351,7 +1473,9 @@ export function CrossboardApp() {
                     ? "Fill all four seats to start."
                     : hasMissingHuman
                       ? "Waiting for a player to reconnect."
-                      : "Everyone is ready."}
+                      : hasInvalidTeams
+                        ? "Put at least one seat on each team."
+                        : "Everyone is ready."}
               </p>
             </div>
           </aside>
@@ -1368,14 +1492,19 @@ export function CrossboardApp() {
     game.turn === localColor &&
     activeSeat.controller === "human";
   const boardInteractive = isMyTurn && !botThinking;
+  const turnAppearance = playerAppearance(
+    game.turn,
+    game.mode,
+    game.teamAssignments,
+  );
   const statusHeading =
     game.phase === "finished"
       ? describeWinner(game)
       : botThinking
-        ? `${isCheckers && game.continuationFrom ? "Computer is chaining jumps" : "Computer is thinking"} · ${COLOR_LABELS[game.turn]}`
+        ? `${isCheckers && game.continuationFrom ? "Computer is chaining jumps" : "Computer is thinking"} · ${turnAppearance.label}`
         : isMyTurn
-          ? `${isCheckers && game.continuationFrom ? "Keep jumping" : "Your turn"} · ${COLOR_LABELS[localColor]}`
-          : `${activeSeat.name}’s turn · ${COLOR_LABELS[game.turn]}`;
+          ? `${isCheckers && game.continuationFrom ? "Keep jumping" : "Your turn"} · ${turnAppearance.label}`
+          : `${displaySeatName(game, game.turn)}’s turn · ${turnAppearance.label}`;
 
   return (
     <main className="game-shell">
@@ -1399,9 +1528,15 @@ export function CrossboardApp() {
         </div>
       </header>
 
-      <section className={`turn-banner banner-${game.turn}`} aria-live="polite">
+      <section
+        className={`turn-banner banner-${game.turn} ${turnAppearance.paletteClass}`}
+        aria-live="polite"
+      >
         <div>
-          <span className={`color-token token-${game.turn}`} aria-hidden="true">
+          <span
+            className={`color-token token-${game.turn} ${turnAppearance.paletteClass}`}
+            aria-hidden="true"
+          >
             {COLOR_SYMBOLS[game.turn]}
           </span>
           <div>
@@ -1419,6 +1554,11 @@ export function CrossboardApp() {
           <div className="player-chip-row">
             {PLAYER_COLORS.map((color) => {
               const seat = game.seats[color];
+              const appearance = playerAppearance(
+                color,
+                game.mode,
+                game.teamAssignments,
+              );
               const connected =
                 seat.controller !== "human" ||
                 humanSeatIsPresent(color, localColor, connectedColors);
@@ -1429,23 +1569,31 @@ export function CrossboardApp() {
                   }${game.eliminated.includes(color) ? " is-eliminated" : ""}`}
                   key={color}
                 >
-                  <span className={`color-token token-${color}`}>
+                  <span
+                    className={`color-token token-${color} ${appearance.paletteClass}`}
+                  >
                     {COLOR_SYMBOLS[color]}
                   </span>
                   <span>
-                    <b>{seat.name}</b>
+                    <b>{displaySeatName(game, color)}</b>
                     <small>
                       {game.eliminated.includes(color)
                         ? isCheckers
                           ? "No pieces or moves"
                           : "King captured"
-                        : seat.controller === "computer"
-                          ? "Computer"
-                          : color === localColor
-                            ? "You"
-                            : connected
-                              ? "Connected"
-                              : "Reconnecting"}
+                        : `${appearance.label}${
+                            appearance.team
+                              ? ` · ${TEAM_LABELS[appearance.team]}`
+                              : ""
+                          } · ${
+                            seat.controller === "computer"
+                              ? "Computer"
+                              : color === localColor
+                                ? "You"
+                                : connected
+                                  ? "Connected"
+                                  : "Reconnecting"
+                          }`}
                     </small>
                   </span>
                 </div>
@@ -1468,7 +1616,7 @@ export function CrossboardApp() {
               <span aria-hidden="true">↻</span> Rotate board
             </button>
             <span>
-              Viewing from <b>{COLOR_LABELS[orientation]}</b>
+              Viewing from <b>{POSITION_LABELS[orientation]}</b>
             </span>
           </div>
 
@@ -1509,28 +1657,44 @@ export function CrossboardApp() {
                 game.history
                   .slice(-12)
                   .reverse()
-                  .map((move, index) => (
-                    <div
-                      className={`history-row${index === 0 ? " latest" : ""}`}
-                      key={move.id}
-                    >
-                      <span className={`history-color token-${move.color}`}>
-                        {COLOR_SYMBOLS[move.color]}
-                      </span>
-                      <div>
-                        <b>
-                          {COLOR_LABELS[move.color]} · {PIECE_LABELS[move.piece]}
-                        </b>
-                        <span>
-                          {move.notation}
-                          {move.eliminated
-                            ? ` · ${COLOR_LABELS[move.eliminated]} eliminated`
-                            : ""}
+                  .map((move, index) => {
+                    const appearance = playerAppearance(
+                      move.color,
+                      game.mode,
+                      game.teamAssignments,
+                    );
+                    const eliminatedAppearance = move.eliminated
+                      ? playerAppearance(
+                          move.eliminated,
+                          game.mode,
+                          game.teamAssignments,
+                        )
+                      : null;
+                    return (
+                      <div
+                        className={`history-row${index === 0 ? " latest" : ""}`}
+                        key={move.id}
+                      >
+                        <span
+                          className={`history-color token-${move.color} ${appearance.paletteClass}`}
+                        >
+                          {COLOR_SYMBOLS[move.color]}
                         </span>
+                        <div>
+                          <b>
+                            {appearance.label} · {PIECE_LABELS[move.piece]}
+                          </b>
+                          <span>
+                            {move.notation}
+                            {eliminatedAppearance
+                              ? ` · ${eliminatedAppearance.label} eliminated`
+                              : ""}
+                          </span>
+                        </div>
+                        <small>#{move.revision}</small>
                       </div>
-                      <small>#{move.revision}</small>
-                    </div>
-                  ))
+                    );
+                  })
               ) : (
                 <p className="empty-history">
                   The opening move will appear here.
@@ -1565,8 +1729,8 @@ export function CrossboardApp() {
               <summary>Checkers rules · {game.checkersRules.preset}</summary>
               <ul>
                 <li>
-                  Opposite-seat teammates block one another and can’t be
-                  captured.
+                  Warm teammates and Cool teammates block one another and
+                  can’t be captured.
                 </li>
                 <li>
                   {game.checkersRules.flyingKings

@@ -4,8 +4,10 @@
 
 - [x] Branch from the board-row sizing fix into an isolated worktree.
 - [x] Add a game menu with Chess and Checkers as first-class choices.
-- [x] Support free-for-all and opposite-seat teams.
+- [x] Support free-for-all and configurable Warm/Cool teams, including 3-v-1.
 - [x] Prevent teammates from capturing one another.
+- [x] Give teammates coordinated Light/Dark/Accent palettes and per-seat team
+  controls in the lobby.
 - [x] Offer American, International, and House presets plus custom toggles.
 - [x] Support flying kings, backward captures, mandatory captures, longest
   capture, and continuing after crowning.
@@ -18,6 +20,8 @@
   team/FFA victory.
 - [x] Include the selected game and checkers options in replicated snapshots
   and deterministic hashes.
+- [x] Replicate team assignments so move legality, AI evaluation, and victory
+  detection agree for every peer.
 
 ## Release gate
 

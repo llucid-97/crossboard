@@ -23,6 +23,7 @@ import {
   Piece,
   PlayerColor,
   PLAYER_COLORS,
+  TeamAssignments,
 } from "../app/game/types";
 
 function checker(
@@ -197,6 +198,52 @@ test("team partners block one another and can never be captured", () => {
     false,
   );
   assert.ok(moves.some((move) => move.to.row === 5 && move.to.col === 4));
+});
+
+test("custom teams, not board position, decide who can be captured", () => {
+  const state = position("teams", {
+    "6,5": checker("red", "red"),
+    "5,4": checker("blue", "blue-ally"),
+    "5,6": checker("yellow", "yellow-opponent"),
+    "3,13": checker("green", "green"),
+  });
+  const teamAssignments: TeamAssignments = {
+    red: "warm",
+    blue: "warm",
+    yellow: "cool",
+    green: "cool",
+  };
+  const moves = getLegalMovesForPiece(
+    { ...state, teamAssignments },
+    { row: 6, col: 5 },
+  );
+  assert.equal(moves.length, 1);
+  assert.deepEqual(moves[0].capturedSquare, { row: 5, col: 6 });
+  assert.deepEqual(moves[0].to, { row: 4, col: 7 });
+});
+
+test("a three-player team wins when the lone opponent is eliminated", () => {
+  const state = position("teams", {
+    "8,3": checker("red", "red"),
+    "7,4": checker("blue", "blue"),
+    "0,3": checker("yellow", "yellow"),
+    "3,13": checker("green", "green"),
+  });
+  const teamAssignments: TeamAssignments = {
+    red: "warm",
+    blue: "cool",
+    yellow: "warm",
+    green: "warm",
+  };
+  const finished = applyMove(
+    { ...state, teamAssignments },
+    {
+      from: { row: 8, col: 3 },
+      to: { row: 6, col: 5 },
+    },
+  );
+  assert.equal(finished.phase, "finished");
+  assert.deepEqual(finished.winners, ["red", "yellow", "green"]);
 });
 
 test("captures chain with the same checker before the turn advances", () => {

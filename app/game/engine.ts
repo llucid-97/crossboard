@@ -3,6 +3,7 @@ import {
   ChessPieceType,
   COLOR_LABELS,
   Coord,
+  DEFAULT_TEAM_ASSIGNMENTS,
   GameKind,
   GameMode,
   GameState,
@@ -13,6 +14,8 @@ import {
   PlayerColor,
   PLAYER_COLORS,
   SeatMap,
+  TeamAssignments,
+  TEAM_LABELS,
 } from "./types";
 import {
   areAllies,
@@ -39,6 +42,8 @@ export {
   squareName,
   teamOf,
 } from "./board";
+
+export { playerAppearance } from "./board";
 
 const BACK_RANK: ChessPieceType[] = [
   "rook",
@@ -151,6 +156,7 @@ export function createGameState(
     gameKind,
     roomCode,
     mode,
+    teamAssignments: { ...DEFAULT_TEAM_ASSIGNMENTS },
     checkersRules: { ...DEFAULT_CHECKERS_RULES },
     phase: "lobby",
     board: {},
@@ -172,6 +178,16 @@ export function createGameState(
 
 export function startGame(state: GameState): GameState {
   if (PLAYER_COLORS.some((color) => state.seats[color].controller === "open")) {
+    return state;
+  }
+  if (
+    state.mode === "teams" &&
+    new Set(
+      PLAYER_COLORS.map((color) =>
+        teamOf(color, state.teamAssignments),
+      ),
+    ).size < 2
+  ) {
     return state;
   }
   return stampState(state, {
@@ -202,7 +218,15 @@ function canLandOn(state: GameState, piece: Piece, coord: Coord): boolean {
     return false;
   }
   const occupant = state.board[squareKey(coord)];
-  return !occupant || !areAllies(piece.color, occupant.color, state.mode);
+  return (
+    !occupant ||
+    !areAllies(
+      piece.color,
+      occupant.color,
+      state.mode,
+      state.teamAssignments,
+    )
+  );
 }
 
 function rayMoves(
@@ -221,7 +245,14 @@ function rayMoves(
       if (!occupant) {
         moves.push({ from, to });
       } else {
-        if (!areAllies(piece.color, occupant.color, state.mode)) {
+        if (
+          !areAllies(
+            piece.color,
+            occupant.color,
+            state.mode,
+            state.teamAssignments,
+          )
+        ) {
           moves.push({ from, to });
         }
         break;
@@ -279,7 +310,15 @@ function pawnMoves(state: GameState, piece: Piece, from: Coord): Move[] {
       continue;
     }
     const occupant = state.board[squareKey(to)];
-    if (occupant && !areAllies(piece.color, occupant.color, state.mode)) {
+    if (
+      occupant &&
+      !areAllies(
+        piece.color,
+        occupant.color,
+        state.mode,
+        state.teamAssignments,
+      )
+    ) {
       moves.push({ from, to });
     }
   }
@@ -373,17 +412,22 @@ export function nextActiveColor(
 function determineWinners(
   mode: GameMode,
   eliminated: PlayerColor[],
+  teamAssignments: TeamAssignments,
 ): PlayerColor[] | null {
   const active = PLAYER_COLORS.filter((color) => !eliminated.includes(color));
   if (mode === "ffa") {
     return active.length <= 1 ? active : null;
   }
-  const activeTeams = new Set(active.map(teamOf));
+  const activeTeams = new Set(
+    active.map((color) => teamOf(color, teamAssignments)),
+  );
   if (activeTeams.size !== 1) {
     return null;
   }
   const winningTeam = [...activeTeams][0];
-  return PLAYER_COLORS.filter((color) => teamOf(color) === winningTeam);
+  return PLAYER_COLORS.filter(
+    (color) => teamOf(color, teamAssignments) === winningTeam,
+  );
 }
 
 function matchingLegalMove(state: GameState, move: Move): Move | undefined {
@@ -451,9 +495,15 @@ function applyChessMove(state: GameState, move: Move): GameState {
   const winners =
     state.mode === "teams" && eliminatedColor
       ? PLAYER_COLORS.filter(
-          (color) => teamOf(color) === teamOf(movingPiece.color),
+          (color) =>
+            teamOf(color, state.teamAssignments) ===
+            teamOf(movingPiece.color, state.teamAssignments),
         )
-      : determineWinners(state.mode, eliminated);
+      : determineWinners(
+          state.mode,
+          eliminated,
+          state.teamAssignments,
+        );
 
   return stampState(state, {
     ...state,
@@ -515,7 +565,11 @@ function applyCheckersMove(state: GameState, requestedMove: Move): GameState {
     !state.eliminated.includes(captured.color)
       ? captured.color
       : undefined;
-  const winners = determineWinners(state.mode, eliminated);
+  const winners = determineWinners(
+    state.mode,
+    eliminated,
+    state.teamAssignments,
+  );
   const canContinueAfterPromotion =
     !promoted || state.checkersRules.continueAfterCrowning;
   const continuationState: GameState = {
@@ -596,7 +650,11 @@ export function passTurn(state: GameState, color: PlayerColor): GameState {
     eliminated = state.eliminated.includes(color)
       ? state.eliminated
       : [...state.eliminated, color];
-    winners = determineWinners(state.mode, eliminated);
+    winners = determineWinners(
+      state.mode,
+      eliminated,
+      state.teamAssignments,
+    );
   }
 
   const nextTurn = nextActiveColor(color, eliminated);
@@ -619,7 +677,12 @@ export function passTurn(state: GameState, color: PlayerColor): GameState {
 
 export function updateLobby(
   state: GameState,
-  updates: Partial<Pick<GameState, "mode" | "seats" | "checkersRules">>,
+  updates: Partial<
+    Pick<
+      GameState,
+      "mode" | "seats" | "teamAssignments" | "checkersRules"
+    >
+  >,
   action: string,
 ): GameState {
   if (state.phase !== "lobby") {
@@ -639,7 +702,8 @@ export function describeWinner(state: GameState): string {
     return "Game over";
   }
   if (state.mode === "teams") {
-    return `${state.winners.map((color) => COLOR_LABELS[color]).join(" + ")} win`;
+    const team = teamOf(state.winners[0], state.teamAssignments);
+    return `${TEAM_LABELS[team]} team wins`;
   }
   return `${COLOR_LABELS[state.winners[0]]} wins`;
 }
@@ -698,6 +762,7 @@ function stableStatePayload(state: GameState): string {
       : {}),
     roomCode: state.roomCode,
     mode: state.mode,
+    teamAssignments: state.teamAssignments,
     phase: state.phase,
     board,
     seats,

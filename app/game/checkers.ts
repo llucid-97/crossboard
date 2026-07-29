@@ -204,7 +204,14 @@ export function checkersCapturesForPiece(
             col += colStep;
             continue;
           }
-          if (areAllies(piece.color, occupant.color, state.mode)) {
+          if (
+            areAllies(
+              piece.color,
+              occupant.color,
+              state.mode,
+              state.teamAssignments,
+            )
+          ) {
             break;
           }
           capturedSquare = current;
@@ -240,7 +247,12 @@ export function checkersCapturesForPiece(
     const occupant = state.board[squareKey(jumped)];
     if (
       occupant &&
-      !areAllies(piece.color, occupant.color, state.mode)
+      !areAllies(
+        piece.color,
+        occupant.color,
+        state.mode,
+        state.teamAssignments,
+      )
     ) {
       captures.push({ from, to, capturedSquare: jumped });
     }

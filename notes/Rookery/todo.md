@@ -4,7 +4,7 @@
 
 - [x] Brand the project **Crossboard**.
 - [x] Build a 14×14 cross-shaped four-player board.
-- [x] Support Free-for-all and opposite-seat Teams.
+- [x] Support Free-for-all and configurable Warm/Cool Teams.
 - [x] Let seats be local human, open for an online player, or computer-controlled.
 - [x] Target a casual-but-thoughtful bot rather than expert strength.
 - [x] Use deterministic replicated state so any connected human can become coordinator.

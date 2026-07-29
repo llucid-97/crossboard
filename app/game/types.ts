@@ -3,6 +3,8 @@ export const PLAYER_COLORS = ["red", "blue", "yellow", "green"] as const;
 export type PlayerColor = (typeof PLAYER_COLORS)[number];
 export type GameKind = "chess" | "checkers";
 export type GameMode = "ffa" | "teams";
+export type TeamId = "warm" | "cool";
+export type TeamAssignments = Record<PlayerColor, TeamId>;
 export type GamePhase = "lobby" | "playing" | "finished";
 export type SeatController = "human" | "open" | "computer";
 export type ChessPieceType =
@@ -71,12 +73,20 @@ export interface Seat {
 export type SeatMap = Record<PlayerColor, Seat>;
 export type BoardState = Record<string, Piece>;
 
+export const DEFAULT_TEAM_ASSIGNMENTS: TeamAssignments = {
+  red: "warm",
+  blue: "cool",
+  yellow: "warm",
+  green: "cool",
+};
+
 export interface GameState {
   schemaVersion: 1;
   ruleset: "crossboard-capture-v1" | "crossboard-checkers-v1";
   gameKind: GameKind;
   roomCode: string;
   mode: GameMode;
+  teamAssignments: TeamAssignments;
   checkersRules: CheckersRules;
   phase: GamePhase;
   board: BoardState;
@@ -106,6 +116,18 @@ export const COLOR_SYMBOLS: Record<PlayerColor, string> = {
   blue: "▲",
   yellow: "◆",
   green: "■",
+};
+
+export const POSITION_LABELS: Record<PlayerColor, string> = {
+  red: "South",
+  blue: "West",
+  yellow: "North",
+  green: "East",
+};
+
+export const TEAM_LABELS: Record<TeamId, string> = {
+  warm: "Warm",
+  cool: "Cool",
 };
 
 export const PIECE_LABELS: Record<PieceType, string> = {

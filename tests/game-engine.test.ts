@@ -9,6 +9,7 @@ import {
   getAllLegalMoves,
   getLegalMovesForPiece,
   isPlayableSquare,
+  playerAppearance,
   squareKey,
   startGame,
   updateLobby,
@@ -24,6 +25,7 @@ import {
   Piece,
   PlayerColor,
   PLAYER_COLORS,
+  TeamAssignments,
 } from "../app/game/types";
 
 function piece(
@@ -201,6 +203,55 @@ test("every accepted action advances a deterministic hash chain", () => {
   assert.equal(changed.parentHash, initial.stateHash);
   assert.notEqual(changed.stateHash, initial.stateHash);
   assert.equal(calculateStateHash(changed), changed.stateHash);
+});
+
+test("team assignments are replicated and change the deterministic hash", () => {
+  const initial = createGameState("TEST-ROOM-TEAMS", "teams");
+  const teamAssignments: TeamAssignments = {
+    red: "warm",
+    blue: "warm",
+    yellow: "warm",
+    green: "cool",
+  };
+  const changed = updateLobby(
+    initial,
+    { teamAssignments },
+    "three-versus-one",
+  );
+  assert.equal(changed.parentHash, initial.stateHash);
+  assert.notEqual(changed.stateHash, initial.stateHash);
+  assert.equal(calculateStateHash(changed), changed.stateHash);
+});
+
+test("team palettes label two-player and three-player sides consistently", () => {
+  const initial = createGameState("TEST-ROOM-PALETTE", "teams");
+  assert.equal(
+    playerAppearance("red", "teams", initial.teamAssignments).label,
+    "Light red",
+  );
+  assert.equal(
+    playerAppearance("yellow", "teams", initial.teamAssignments).label,
+    "Dark red",
+  );
+  assert.equal(
+    playerAppearance("blue", "teams", initial.teamAssignments).label,
+    "Light blue",
+  );
+
+  const threeVersusOne: TeamAssignments = {
+    red: "warm",
+    blue: "warm",
+    yellow: "warm",
+    green: "cool",
+  };
+  assert.equal(
+    playerAppearance("yellow", "teams", threeVersusOne).label,
+    "Orange",
+  );
+  assert.equal(
+    playerAppearance("green", "teams", threeVersusOne).label,
+    "Light blue",
+  );
 });
 
 test("partitioned copies choose the same first child after their common ancestor", () => {

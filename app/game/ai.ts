@@ -68,9 +68,13 @@ function evaluate(state: GameState, perspective: PlayerColor): number {
   }
 
   if (state.mode === "teams") {
-    const ownTeam = teamOf(perspective);
+    const ownTeam = teamOf(perspective, state.teamAssignments);
     return PLAYER_COLORS.reduce((score, color) => {
-      return score + totals[color] * (teamOf(color) === ownTeam ? 1 : -1);
+      return (
+        score +
+        totals[color] *
+          (teamOf(color, state.teamAssignments) === ownTeam ? 1 : -1)
+      );
     }, 0);
   }
 
@@ -122,7 +126,9 @@ function isFriendlyActor(
 ): boolean {
   return (
     actor === perspective ||
-    (state.mode === "teams" && teamOf(actor) === teamOf(perspective))
+    (state.mode === "teams" &&
+      teamOf(actor, state.teamAssignments) ===
+        teamOf(perspective, state.teamAssignments))
   );
 }
 
