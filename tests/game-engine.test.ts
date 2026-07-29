@@ -168,6 +168,10 @@ test("pawns move one or two squares and promote on the rank-eleven line", () => 
     to: { row: 3, col: 6 },
   });
   assert.equal(promoted.board["3,6"].type, "queen");
+  const restored = undoLastTurn(promoted);
+  assert.equal(restored.board["4,6"].type, "pawn");
+  assert.equal(restored.board["4,6"].hasMoved, false);
+  assert.equal(restored.board["3,6"], undefined);
 });
 
 test("capturing a king eliminates a color in free-for-all", () => {
@@ -206,6 +210,12 @@ test("capturing either enemy king immediately wins a team game", () => {
   });
   assert.equal(next.phase, "finished");
   assert.deepEqual(next.winners, ["red", "yellow"]);
+
+  const restored = undoLastTurn(next);
+  assert.deepEqual(restored.board, state.board);
+  assert.deepEqual(restored.eliminated, state.eliminated);
+  assert.equal(restored.phase, "playing");
+  assert.equal(restored.winners, null);
 });
 
 test("the casual four-ply bot is deterministic and returns a legal move", () => {

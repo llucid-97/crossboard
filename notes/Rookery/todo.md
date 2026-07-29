@@ -71,4 +71,8 @@
 - [x] Record every color eliminated by a deferred multi-capture chain.
 - [x] Keep the local recommended checkers setup startable and hide controls
   that would create unfillable open seats without a mesh.
+- [x] Reject self-hashed schema-v3 snapshots with partial or invalid team maps.
+- [x] Restore direct promotion and finished-team-game undo regressions.
+- [x] Clear deferred-capture state on passes and keep crowned checker contrast
+  legible across every team palette.
 - [x] Pass worker build/tests, GitHub Pages export, TypeScript, and lint.

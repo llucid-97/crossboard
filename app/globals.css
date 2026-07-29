@@ -1249,7 +1249,7 @@ button:disabled {
 .checker-piece > span {
   position: relative;
   z-index: 1;
-  color: #fff6c4;
+  color: var(--player-ink, #fff6c4);
   font-family: Georgia, serif;
   font-size: clamp(11px, 2.4vw, 31px);
   line-height: 1;

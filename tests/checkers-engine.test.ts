@@ -581,17 +581,21 @@ test("the maximum-capture option keeps only the longest available chain", () => 
 });
 
 test("a color with no legal move is eliminated when its turn passes", () => {
-  const state = position("ffa", {
-    "0,3": checker("red", "trapped-red"),
-    "3,0": checker("blue", "blue"),
-    "0,9": checker("yellow", "yellow"),
-    "3,13": checker("green", "green"),
-  });
+  const state: GameState = {
+    ...position("ffa", {
+      "0,3": checker("red", "trapped-red"),
+      "3,0": checker("blue", "blue"),
+      "0,9": checker("yellow", "yellow"),
+      "3,13": checker("green", "green"),
+    }),
+    pendingCapturedSquares: [{ row: 1, col: 4 }],
+  };
   assert.deepEqual(getAllLegalMoves(state, "red"), []);
   const next = passTurn(state, "red");
   assert.deepEqual(next.eliminated, ["red"]);
   assert.equal(next.board["0,3"], undefined);
   assert.equal(next.turn, "blue");
+  assert.deepEqual(next.pendingCapturedSquares, []);
 });
 
 test("the casual bot returns the same legal checkers move every time", () => {
@@ -674,6 +678,36 @@ test("changing a replicated checkers option changes the deterministic hash", () 
   assert.equal(changed.parentHash, initial.stateHash);
   assert.notEqual(changed.stateHash, initial.stateHash);
   assert.equal(calculateStateHash(changed), changed.stateHash);
+});
+
+test("schema v3 rejects self-hashed partial or invalid team assignments", () => {
+  const initial = createGameState(
+    "CHECKERS-FORGED-TEAMS",
+    "teams",
+    "Red",
+    "checkers",
+  );
+  const forgedAssignments = [
+    {
+      red: "warm",
+      blue: "cool",
+      yellow: "warm",
+    },
+    {
+      ...initial.teamAssignments,
+      green: "spectator",
+    },
+  ];
+
+  for (const teamAssignments of forgedAssignments) {
+    const forged = {
+      ...initial,
+      teamAssignments,
+      stateHash: "",
+    } as unknown as GameState;
+    forged.stateHash = calculateStateHash(forged);
+    assert.equal(normalizeGameState(forged), null);
+  }
 });
 
 test("schema v3 hashes every replicated checkers and move-history field", () => {

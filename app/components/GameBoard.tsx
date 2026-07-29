@@ -59,6 +59,9 @@ function focusDisplaySquare(
   rowStep: number,
   colStep: number,
 ): void {
+  if (rowStep === 0 && colStep === 0) {
+    return;
+  }
   let nextRow = row;
   let nextCol = col;
   while (

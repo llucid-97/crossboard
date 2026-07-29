@@ -786,6 +786,7 @@ export function passTurn(state: GameState, color: PlayerColor): GameState {
     winners,
     phase: winners ? "finished" : "playing",
     continuationFrom: null,
+    pendingCapturedSquares: [],
     lastActionId: `pass-${revision}-${color}`,
   });
 }
@@ -1072,6 +1073,19 @@ function hasCurrentCheckersRules(value: unknown): value is CheckersRules {
   );
 }
 
+function hasCurrentTeamAssignments(
+  value: unknown,
+): value is TeamAssignments {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const assignments = value as Record<string, unknown>;
+  return PLAYER_COLORS.every(
+    (color) =>
+      assignments[color] === "warm" || assignments[color] === "cool",
+  );
+}
+
 export function normalizeGameState(value: unknown): GameState | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -1095,8 +1109,7 @@ export function normalizeGameState(value: unknown): GameState | null {
         candidate.ruleset !== "crossboard-capture-v1") ||
       (candidate.gameKind === "checkers" &&
         candidate.ruleset !== "crossboard-checkers-v1") ||
-      !candidate.teamAssignments ||
-      typeof candidate.teamAssignments !== "object" ||
+      !hasCurrentTeamAssignments(candidate.teamAssignments) ||
       !hasCurrentCheckersRules(candidate.checkersRules) ||
       !Array.isArray(candidate.pendingCapturedSquares) ||
       !Array.isArray(candidate.undoStack) ||
