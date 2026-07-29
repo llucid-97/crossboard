@@ -62,14 +62,16 @@ npm test
 Useful commands:
 
 - `npm run build` creates the production worker and client assets.
+- `npm run build:pages` creates the static GitHub Pages bundle in `out/`.
 - `npm run lint` checks the application source.
 - `npm run test:game` runs the rules, AI determinism, hashing, and coordinator
   election tests.
 
 ## Hosting
 
-The current build targets OpenAI Sites/Cloudflare Workers. The game logic itself
-needs no application database and uses query-string room links, so it can also
-live on GitHub Pages after replacing the small server-rendered shell with a
-static Vite entry or static adapter. Multiplayer still uses PeerJS in either
-case.
+Crossboard is published at
+[llucid-97.github.io/crossboard](https://llucid-97.github.io/crossboard/).
+Every push to `main` creates a static Next.js export and deploys it through
+GitHub Pages. The game logic, casual minimax computer players, and recovery
+snapshots all run in each browser. PeerJS supplies multiplayer discovery and
+WebRTC signalling; the game itself needs no application server or database.
