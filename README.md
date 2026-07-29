@@ -12,9 +12,12 @@ machine needs to remain a permanent host.
 - **Teams:** Red + Yellow versus Blue + Green; the first enemy king captured
   ends the match.
 - A deterministic, beam-limited four-ply minimax bot tuned for casual play.
+- One-click Teams practice with a computer teammate, or free-for-all practice
+  against three computer rivals.
 - PeerJS room discovery and a full browser-to-browser state mesh.
 - Hash-chained snapshots, deterministic fork resolution, local recovery copies,
   and automatic coordinator election.
+- Shared undo that rewinds the latest human decision and any computer replies.
 - Touch/click movement, keyboard-friendly squares, legal-move hints, move
   history, reconnect notices, and mobile legal-move controls.
 
@@ -38,7 +41,9 @@ The deployed site serves the app, while PeerJS Cloud performs the initial
 WebRTC handshake. Moves and snapshots then travel directly among the connected
 browsers. Every human has the current position, and the lowest connected human
 seat coordinates lobby controls and computer turns. If that browser leaves, the
-next human seat takes over.
+next human seat takes over. Online undo requests also pass through that
+coordinator, which publishes the rewound position to everyone as a new shared
+state.
 
 The app also saves a recovery copy in each player's browser. If every human
 closes the room, another device cannot resurrect it without a small persistence

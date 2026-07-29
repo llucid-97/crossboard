@@ -11,9 +11,11 @@ import {
   PlayerColor,
   PLAYER_COLORS,
   SeatMap,
+  UndoFrame,
 } from "./types";
 
 export const BOARD_SIZE = 14;
+const MAX_UNDO_FRAMES = 8;
 
 const BACK_RANK: PieceType[] = [
   "rook",
@@ -148,7 +150,7 @@ export function createGameState(
   localName = "You",
 ): GameState {
   const state: GameState = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     ruleset: "crossboard-capture-v1",
     roomCode,
     mode,
@@ -159,6 +161,7 @@ export function createGameState(
     revision: 0,
     round: 1,
     history: [],
+    undoStack: [],
     eliminated: [],
     winners: null,
     lastActionId: `room-${roomCode}`,
@@ -181,6 +184,7 @@ export function startGame(state: GameState): GameState {
     revision: state.revision + 1,
     round: 1,
     history: [],
+    undoStack: [],
     eliminated: [],
     winners: null,
     lastActionId: `start-${state.revision + 1}`,
@@ -373,7 +377,28 @@ function isMoveLegal(state: GameState, move: Move): boolean {
   );
 }
 
-export function applyMove(state: GameState, move: Move): GameState {
+function appendUndoFrame(
+  state: GameState,
+  actor: PlayerColor,
+): UndoFrame[] {
+  const frame: UndoFrame = {
+    actor,
+    phase: state.phase,
+    board: { ...state.board },
+    turn: state.turn,
+    round: state.round,
+    historyLength: state.history.length,
+    eliminated: [...state.eliminated],
+    winners: state.winners ? [...state.winners] : null,
+  };
+  return [...(state.undoStack ?? []), frame].slice(-MAX_UNDO_FRAMES);
+}
+
+export function applyMove(
+  state: GameState,
+  move: Move,
+  recordUndo = true,
+): GameState {
   const movingPiece = state.board[squareKey(move.from)];
   if (
     state.phase !== "playing" ||
@@ -443,6 +468,11 @@ export function applyMove(state: GameState, move: Move): GameState {
     revision,
     round: state.round + (wrapped ? 1 : 0),
     history: [...state.history, record],
+    undoStack: recordUndo
+      ? state.seats[movingPiece.color].controller === "human"
+        ? appendUndoFrame(state, movingPiece.color)
+        : state.undoStack
+      : [],
     eliminated,
     winners,
     phase: winners ? "finished" : "playing",
@@ -467,7 +497,43 @@ export function passTurn(state: GameState, color: PlayerColor): GameState {
     turn: nextTurn,
     revision,
     round: state.round + (wrapped ? 1 : 0),
+    undoStack:
+      state.seats[color].controller === "human"
+        ? appendUndoFrame(state, color)
+        : state.undoStack,
     lastActionId: `pass-${revision}-${color}`,
+  });
+}
+
+export function getUndoActionCount(state: GameState): number {
+  return state.undoStack?.length ? 1 : 0;
+}
+
+export function undoLastTurn(state: GameState): GameState {
+  if (state.phase === "lobby") {
+    return state;
+  }
+  const stack = state.undoStack ?? [];
+  const actionCount = getUndoActionCount(state);
+  if (!actionCount) {
+    return state;
+  }
+
+  const frameIndex = stack.length - 1;
+  const frame = stack[frameIndex];
+  const revision = state.revision + 1;
+  return stampState(state, {
+    ...state,
+    phase: frame.phase,
+    board: { ...frame.board },
+    turn: frame.turn,
+    revision,
+    round: frame.round,
+    history: state.history.slice(0, frame.historyLength),
+    undoStack: stack.slice(0, frameIndex),
+    eliminated: [...frame.eliminated],
+    winners: frame.winners ? [...frame.winners] : null,
+    lastActionId: `undo-${revision}-${frame.actor}`,
   });
 }
 
@@ -488,6 +554,33 @@ export function updateLobby(
   });
 }
 
+export function createPracticeGame(
+  mode: GameMode,
+  localName = "You",
+): GameState {
+  const initial = createGameState("PRACTICE", mode, localName);
+  const seats = { ...initial.seats };
+  PLAYER_COLORS.forEach((color) => {
+    if (color !== "red") {
+      seats[color] = {
+        color,
+        controller: "computer",
+        name: `Computer ${COLOR_LABELS[color]}`,
+      };
+    }
+  });
+  return startGame(
+    updateLobby(
+      initial,
+      {
+        mode,
+        seats,
+      },
+      `practice-${mode}`,
+    ),
+  );
+}
+
 export function describeWinner(state: GameState): string {
   if (!state.winners?.length) {
     return "Game over";
@@ -502,8 +595,8 @@ export function getStateSignature(state: GameState): string {
   return `${state.revision}:${state.stateHash}`;
 }
 
-function stableStatePayload(state: GameState): string {
-  const board = Object.entries(state.board)
+function stableBoardPayload(boardState: BoardState) {
+  return Object.entries(boardState)
     .sort(([first], [second]) => first.localeCompare(second))
     .map(([square, piece]) => [
       square,
@@ -512,11 +605,10 @@ function stableStatePayload(state: GameState): string {
       piece.type,
       piece.hasMoved ? 1 : 0,
     ]);
-  const seats = PLAYER_COLORS.map((color) => {
-    const seat = state.seats[color];
-    return [color, seat.controller, seat.name, seat.peerId ?? ""];
-  });
-  const history = state.history.map((move) => [
+}
+
+function stableHistoryPayload(historyState: MoveRecord[]) {
+  return historyState.map((move) => [
     move.id,
     move.revision,
     move.color,
@@ -528,7 +620,16 @@ function stableStatePayload(state: GameState): string {
     move.captured ?? "",
     move.eliminated ?? "",
   ]);
-  return JSON.stringify({
+}
+
+function stableStatePayload(state: GameState): string {
+  const board = stableBoardPayload(state.board);
+  const seats = PLAYER_COLORS.map((color) => {
+    const seat = state.seats[color];
+    return [color, seat.controller, seat.name, seat.peerId ?? ""];
+  });
+  const history = stableHistoryPayload(state.history);
+  const payload = {
     schemaVersion: state.schemaVersion,
     ruleset: state.ruleset,
     roomCode: state.roomCode,
@@ -545,7 +646,20 @@ function stableStatePayload(state: GameState): string {
     lastActionId: state.lastActionId,
     parentHash: state.parentHash,
     lineage: state.lineage,
-  });
+  };
+  const undoStack = state.undoStack?.map((frame) => [
+    frame.actor,
+    frame.phase,
+    stableBoardPayload(frame.board),
+    frame.turn,
+    frame.round,
+    frame.historyLength,
+    frame.eliminated,
+    frame.winners,
+  ]);
+  return JSON.stringify(
+    undoStack === undefined ? payload : { ...payload, undoStack },
+  );
 }
 
 export function calculateStateHash(state: GameState): string {
@@ -562,6 +676,45 @@ export function calculateStateHash(state: GameState): string {
     .padStart(8, "0")}`;
 }
 
+export function normalizeGameState(value: unknown): GameState | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as Omit<GameState, "schemaVersion"> & {
+    schemaVersion: number;
+  };
+  if (
+    candidate.ruleset !== "crossboard-capture-v1" ||
+    (candidate.schemaVersion !== 1 && candidate.schemaVersion !== 2)
+  ) {
+    return null;
+  }
+
+  try {
+    if (calculateStateHash(candidate as GameState) !== candidate.stateHash) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  if (candidate.schemaVersion === 2) {
+    return Array.isArray(candidate.undoStack)
+      ? (candidate as GameState)
+      : null;
+  }
+
+  const legacy = candidate as unknown as GameState;
+  const revision = legacy.revision + 1;
+  return stampState(legacy, {
+    ...legacy,
+    schemaVersion: 2,
+    revision,
+    undoStack: [],
+    lastActionId: `upgrade-${revision}`,
+  });
+}
+
 function stampState(previous: GameState, next: GameState): GameState {
   const stamped = {
     ...next,
@@ -569,7 +722,11 @@ function stampState(previous: GameState, next: GameState): GameState {
     stateHash: "",
     lineage: [
       ...previous.lineage,
-      { revision: previous.revision, stateHash: previous.stateHash },
+      {
+        revision: previous.revision,
+        stateHash: previous.stateHash,
+        lastActionId: previous.lastActionId,
+      },
     ].slice(-64),
   };
   return { ...stamped, stateHash: calculateStateHash(stamped) };
