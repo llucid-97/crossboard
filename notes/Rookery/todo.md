@@ -25,8 +25,10 @@
 - [x] Build and resolve compile errors.
 - [x] Pass the engine/render tests, lint, and TypeScript checks.
 - [x] Generate and wire the Crossboard social-preview card.
-- [ ] Package, save, and deploy the exact tested source.
-- [ ] Remove the build heartbeat.
+- [ ] Package, save, and deploy the exact tested source. Blocked because Sites
+  is disabled for this workspace; GitHub Pages would require approval for a
+  public repository/deployment.
+- [x] Remove the build heartbeat after reaching the hosting decision point.
 
 ## Deliberate v1 limits
 
