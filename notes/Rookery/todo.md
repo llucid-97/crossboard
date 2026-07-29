@@ -27,9 +27,9 @@
 - [x] Generate and wire the Crossboard social-preview card.
 - [x] Export the application for GitHub Pages and verify its `/crossboard`
   asset paths.
-- [ ] Publish the exact tested source through GitHub Actions and verify the
+- [x] Publish the exact tested source through GitHub Actions and verify the
   public URL.
-- [ ] Remove the deployment heartbeat after the public site is healthy.
+- [x] Remove the deployment heartbeat after the public site is healthy.
 
 ## Deliberate v1 limits
 
