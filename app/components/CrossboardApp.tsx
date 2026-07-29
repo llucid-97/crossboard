@@ -13,10 +13,13 @@ import {
   applyMove,
   calculateStateHash,
   createGameState,
+  createPracticeGame,
   describeWinner,
   gameKindOf,
   getAllLegalMoves,
   getLegalMovesForPiece,
+  getUndoActionCount,
+  normalizeGameState,
   passTurn,
   playerAppearance,
   sameSquare,
@@ -24,18 +27,22 @@ import {
   squareName,
   startGame,
   teamOf,
+  undoLastTurn,
   updateLobby,
 } from "../game/engine";
 import { checkersRulesForPreset } from "../game/checkers";
 import {
   discoverRoom,
+  coordinatorOwnsState,
   electCoordinator,
   PeerMesh,
   seatPeerId,
   shouldAdoptSnapshot,
   SignalStatus,
+  undoRequesterFor,
   WireMessage,
 } from "../game/network";
+import { runLobbyCommand } from "../game/lobby";
 import {
   COLOR_LABELS,
   COLOR_SYMBOLS,
@@ -80,15 +87,6 @@ function normalizeRoomCode(value: string): string {
     .join("-");
 }
 
-function isValidSnapshot(state: GameState): boolean {
-  return (
-    state.schemaVersion === 1 &&
-    (state.ruleset === "crossboard-capture-v1" ||
-      state.ruleset === "crossboard-checkers-v1") &&
-    calculateStateHash(state) === state.stateHash
-  );
-}
-
 function humanSeatIsPresent(
   color: PlayerColor,
   localColor: PlayerColor,
@@ -122,12 +120,17 @@ function readStoredMatch(): StoredMatch | null {
   }
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
+    const state = normalizeGameState(parsed?.state);
     if (
-      parsed?.state &&
+      state &&
       PLAYER_COLORS.includes(parsed.localColor) &&
-      isValidSnapshot(parsed.state)
+      parsed?.savedAt
     ) {
-      return parsed as StoredMatch;
+      return {
+        state,
+        localColor: parsed.localColor,
+        savedAt: parsed.savedAt,
+      } as StoredMatch;
     }
   } catch {
     return null;
@@ -312,33 +315,44 @@ export function CrossboardApp() {
     });
   }, []);
 
+  const commitState = useCallback(
+    (next: GameState, broadcast = true) => {
+      installState(next);
+      if (broadcast) {
+        broadcastSnapshot(next);
+      }
+    },
+    [broadcastSnapshot, installState],
+  );
+
   const acceptRemoteSnapshot = useCallback(
     (incoming: GameState) => {
-      if (!isValidSnapshot(incoming)) {
+      const normalized = normalizeGameState(incoming);
+      if (!normalized) {
         setNotice("A peer sent an incompatible game copy. It was ignored.");
         return;
       }
       const current = gameRef.current;
       if (!current) {
-        installState(incoming);
-        setSelectedGame(gameKindOf(incoming));
+        installState(normalized);
+        setSelectedGame(gameKindOf(normalized));
         return;
       }
-      if (incoming.stateHash === current.stateHash) {
+      if (normalized.stateHash === current.stateHash) {
         return;
       }
 
-      if (shouldAdoptSnapshot(current, incoming)) {
+      if (shouldAdoptSnapshot(current, normalized)) {
         const forked =
-          incoming.parentHash !== current.stateHash &&
-          current.parentHash !== incoming.stateHash;
+          normalized.parentHash !== current.stateHash &&
+          current.parentHash !== normalized.stateHash;
         if (forked) {
           setNotice("The room compared two copies and restored one shared position.");
         }
-        installState(incoming);
-        setSelectedGame(gameKindOf(incoming));
+        installState(normalized);
+        setSelectedGame(gameKindOf(normalized));
         setSelected(null);
-        if (incoming.phase !== "lobby") {
+        if (normalized.phase !== "lobby") {
           setView("game");
         }
       }
@@ -358,6 +372,31 @@ export function CrossboardApp() {
                 sender: mesh.localPeerId,
                 state: current,
               });
+            }
+            return;
+          }
+          if (message.type === "undo-request") {
+            const current = gameRef.current;
+            const requester = current
+              ? undoRequesterFor(
+                  current,
+                  localColorRef.current,
+                  connectedRef.current,
+                  remotePeerId,
+                  message.stateHash,
+                )
+              : null;
+            if (!current || !requester) {
+              return;
+            }
+            const next = undoLastTurn(current);
+            if (next !== current) {
+              commitState(next);
+              setSelected(null);
+              setView("game");
+              setNotice(
+                `${current.seats[requester].name} rewound the last turn.`,
+              );
             }
             return;
           }
@@ -383,7 +422,7 @@ export function CrossboardApp() {
       await mesh.start();
       return mesh;
     },
-    [acceptRemoteSnapshot],
+    [acceptRemoteSnapshot, commitState],
   );
 
   useEffect(() => {
@@ -436,16 +475,6 @@ export function CrossboardApp() {
     game.phase === "playing" &&
     game.seats[game.turn].controller === "computer";
 
-  const commitState = useCallback(
-    (next: GameState, broadcast = true) => {
-      installState(next);
-      if (broadcast) {
-        broadcastSnapshot(next);
-      }
-    },
-    [broadcastSnapshot, installState],
-  );
-
   useEffect(() => {
     if (
       !game ||
@@ -456,12 +485,18 @@ export function CrossboardApp() {
     ) {
       return;
     }
-    const revision = game.revision;
+    const expectedStateHash = game.stateHash;
     const timer = window.setTimeout(() => {
       const current = gameRef.current;
       if (
         !current ||
-        current.revision !== revision ||
+        !coordinatorOwnsState(
+          current,
+          expectedStateHash,
+          localColorRef.current,
+          connectedRef.current,
+        ) ||
+        gameKindOf(current) !== "checkers" ||
         current.phase !== "playing" ||
         getAllLegalMoves(current, current.turn).length
       ) {
@@ -485,12 +520,17 @@ export function CrossboardApp() {
       return;
     }
 
-    const revision = game.revision;
+    const expectedStateHash = game.stateHash;
     const timer = window.setTimeout(() => {
       const current = gameRef.current;
       if (
         !current ||
-        current.revision !== revision ||
+        !coordinatorOwnsState(
+          current,
+          expectedStateHash,
+          localColorRef.current,
+          connectedRef.current,
+        ) ||
         current.phase !== "playing" ||
         current.seats[current.turn].controller !== "computer"
       ) {
@@ -550,8 +590,8 @@ export function CrossboardApp() {
     setJoining(true);
     setNotice("Looking for the room…");
     try {
-      const discovered = await discoverRoom(roomCode);
-      if (!isValidSnapshot(discovered)) {
+      const discovered = normalizeGameState(await discoverRoom(roomCode));
+      if (!discovered) {
         throw new Error("Incompatible room");
       }
       if (discovered.phase !== "lobby") {
@@ -611,25 +651,15 @@ export function CrossboardApp() {
     }
   };
 
-  const startPractice = (kind: GameKind = selectedGame) => {
-    const initial = createGameState(
-      "PRACTICE",
-      "ffa",
+  const startPractice = (
+    mode: GameMode,
+    kind: GameKind = selectedGame,
+  ) => {
+    const started = createPracticeGame(
+      mode,
       playerName.trim() || "You",
       kind,
     );
-    const seats = { ...initial.seats };
-    PLAYER_COLORS.forEach((color) => {
-      if (color !== "red") {
-        seats[color] = {
-          color,
-          controller: "computer",
-          name: `Computer ${COLOR_LABELS[color]}`,
-        };
-      }
-    });
-    const ready = updateLobby(initial, { seats, mode: "ffa" }, "practice");
-    const started = startGame(ready);
     meshRef.current?.close();
     meshRef.current = null;
     localColorRef.current = "red";
@@ -639,7 +669,21 @@ export function CrossboardApp() {
     setIsNetworked(false);
     setSignalStatus("online");
     setConnectedColors([]);
-    installState(kind === "checkers" ? ready : started, false);
+    installState(
+      kind === "checkers"
+        ? updateLobby(
+            createGameState(
+              "PRACTICE",
+              mode,
+              playerName.trim() || "You",
+              kind,
+            ),
+            { mode, seats: started.seats },
+            `practice-${kind}-${mode}`,
+          )
+        : started,
+      false,
+    );
     setView(kind === "checkers" ? "lobby" : "game");
     if (kind === "checkers") {
       setNotice("Choose your checkers variation, then start when ready.");
@@ -682,54 +726,69 @@ export function CrossboardApp() {
     updateLocation();
   };
 
+  const commitLobbyMutation = (
+    command: (current: GameState) => GameState,
+  ) =>
+    runLobbyCommand(gameRef, commitState, (current) => {
+      if (
+        electCoordinator(
+          current,
+          localColorRef.current,
+          connectedRef.current,
+        ) !== localColorRef.current
+      ) {
+        return current;
+      }
+      return command(current);
+    });
+
   const changeMode = (mode: GameMode) => {
-    if (!game || coordinator !== localColor) {
-      return;
-    }
-    commitState(updateLobby(game, { mode }, `mode-${mode}`));
+    commitLobbyMutation((current) =>
+      updateLobby(current, { mode }, `mode-${mode}`),
+    );
   };
 
   const changeTeamAssignment = (color: PlayerColor, team: TeamId) => {
-    if (!game || coordinator !== localColor || game.mode !== "teams") {
-      return;
-    }
-    const currentTeam = teamOf(color, game.teamAssignments);
-    if (currentTeam === team) {
-      return;
-    }
-    const currentTeamSize = PLAYER_COLORS.filter(
-      (candidate) =>
-        teamOf(candidate, game.teamAssignments) === currentTeam,
-    ).length;
-    if (currentTeamSize <= 1) {
-      setNotice("Each side needs at least one seat.");
-      return;
-    }
-    const teamAssignments = {
-      ...game.teamAssignments,
-      [color]: team,
-    };
-    commitState(
-      updateLobby(
-        game,
-        { teamAssignments },
+    commitLobbyMutation((current) => {
+      if (current.mode !== "teams") {
+        return current;
+      }
+      const currentTeam = teamOf(color, current.teamAssignments);
+      if (currentTeam === team) {
+        return current;
+      }
+      const currentTeamSize = PLAYER_COLORS.filter(
+        (candidate) =>
+          teamOf(candidate, current.teamAssignments) === currentTeam,
+      ).length;
+      if (currentTeamSize <= 1) {
+        setNotice("Each side needs at least one seat.");
+        return current;
+      }
+      return updateLobby(
+        current,
+        {
+          teamAssignments: {
+            ...current.teamAssignments,
+            [color]: team,
+          },
+        },
         `team-${color}-${team}`,
-      ),
-    );
+      );
+    });
   };
 
   const changeCheckersPreset = (
     preset: Exclude<CheckersPreset, "custom">,
   ) => {
-    if (!game || coordinator !== localColor || gameKindOf(game) !== "checkers") {
-      return;
-    }
-    commitState(
-      updateLobby(
-        game,
-        { checkersRules: checkersRulesForPreset(preset) },
-        `checkers-preset-${preset}`,
-      ),
+    commitLobbyMutation((current) =>
+      gameKindOf(current) === "checkers"
+        ? updateLobby(
+            current,
+            { checkersRules: checkersRulesForPreset(preset) },
+            `checkers-preset-${preset}`,
+          )
+        : current,
     );
   };
 
@@ -737,125 +796,129 @@ export function CrossboardApp() {
     rule: keyof Omit<CheckersRules, "preset">,
     enabled: boolean,
   ) => {
-    if (!game || coordinator !== localColor || gameKindOf(game) !== "checkers") {
-      return;
-    }
-    const checkersRules: CheckersRules = {
-      ...game.checkersRules,
-      preset: "custom",
-      [rule]: enabled,
-    };
-    if (rule === "mandatoryCapture" && !enabled) {
-      checkersRules.maximumCapture = false;
-    }
-    commitState(
-      updateLobby(
-        game,
+    commitLobbyMutation((current) => {
+      if (gameKindOf(current) !== "checkers") {
+        return current;
+      }
+      const checkersRules: CheckersRules = {
+        ...current.checkersRules,
+        preset: "custom",
+        [rule]: enabled,
+      };
+      if (rule === "mandatoryCapture" && !enabled) {
+        checkersRules.maximumCapture = false;
+      }
+      return updateLobby(
+        current,
         { checkersRules },
         `checkers-rule-${rule}-${enabled ? "on" : "off"}`,
-      ),
-    );
+      );
+    });
   };
 
   const changeSeatController = (
     color: PlayerColor,
     controller: SeatController,
   ) => {
-    if (!game || coordinator !== localColor || color === localColor) {
-      return;
-    }
-    const seat = game.seats[color];
-    if (seat.controller === "human") {
-      return;
-    }
-    const seats = {
-      ...game.seats,
-      [color]: {
-        color,
-        controller,
-        name:
-          controller === "computer"
-            ? `Computer ${COLOR_LABELS[color]}`
-            : "Open seat",
-      },
-    };
-    commitState(updateLobby(game, { seats }, `seat-${color}-${controller}`));
+    commitLobbyMutation((current) => {
+      const local = localColorRef.current;
+      const seat = current.seats[color];
+      if (color === local || seat.controller === "human") {
+        return current;
+      }
+      const seats = {
+        ...current.seats,
+        [color]: {
+          color,
+          controller,
+          name:
+            controller === "computer"
+              ? `Computer ${COLOR_LABELS[color]}`
+              : "Open seat",
+        },
+      };
+      return updateLobby(
+        current,
+        { seats },
+        `seat-${color}-${controller}`,
+      );
+    });
   };
 
   const applyFriendsVsComputersPreset = () => {
-    if (!game || coordinator !== localColor) {
-      return;
-    }
-    const opposite =
-      localColor === "red"
-        ? "yellow"
-        : localColor === "yellow"
-          ? "red"
-          : localColor === "blue"
-            ? "green"
-            : "blue";
-    const seats = { ...game.seats };
-    const localTeam = teamOf(localColor, game.teamAssignments);
-    const otherTeam: TeamId = localTeam === "warm" ? "cool" : "warm";
-    const teamAssignments = { ...game.teamAssignments };
-    PLAYER_COLORS.forEach((color) => {
-      teamAssignments[color] =
-        color === localColor || color === opposite ? localTeam : otherTeam;
-      if (color === localColor || seats[color].controller === "human") {
-        return;
-      }
-      const controller = color === opposite ? "open" : "computer";
-      seats[color] = {
-        color,
-        controller,
-        name:
-          controller === "open"
-            ? "Open seat"
-            : `Computer ${COLOR_LABELS[color]}`,
-      };
-    });
-    commitState(
-      updateLobby(
-        game,
+    commitLobbyMutation((current) => {
+      const local = localColorRef.current;
+      const opposite =
+        local === "red"
+          ? "yellow"
+          : local === "yellow"
+            ? "red"
+            : local === "blue"
+              ? "green"
+              : "blue";
+      const seats = { ...current.seats };
+      const localTeam = teamOf(local, current.teamAssignments);
+      const otherTeam: TeamId = localTeam === "warm" ? "cool" : "warm";
+      const teamAssignments = { ...current.teamAssignments };
+      PLAYER_COLORS.forEach((color) => {
+        teamAssignments[color] =
+          color === local || color === opposite ? localTeam : otherTeam;
+        if (color === local || seats[color].controller === "human") {
+          return;
+        }
+        const controller = color === opposite ? "open" : "computer";
+        seats[color] = {
+          color,
+          controller,
+          name:
+            controller === "open"
+              ? "Open seat"
+              : `Computer ${COLOR_LABELS[color]}`,
+        };
+      });
+      return updateLobby(
+        current,
         { mode: "teams", seats, teamAssignments },
         "preset-friends-v-computers",
-      ),
-    );
+      );
+    });
   };
 
   const beginGame = () => {
-    if (!game || coordinator !== localColor) {
-      return;
-    }
-    const hasOpenSeat = PLAYER_COLORS.some(
-      (color) => game.seats[color].controller === "open",
-    );
-    const missingHuman = PLAYER_COLORS.some(
-      (color) =>
-        game.seats[color].controller === "human" &&
-        !humanSeatIsPresent(color, localColor, connectedColors),
-    );
-    const hasInvalidTeams =
-      game.mode === "teams" &&
-      new Set(
-        PLAYER_COLORS.map((color) =>
-          teamOf(color, game.teamAssignments),
-        ),
-      ).size < 2;
-    if (hasOpenSeat || missingHuman || hasInvalidTeams) {
-      setNotice(
-        hasOpenSeat
-          ? "Fill all four seats before starting."
-          : missingHuman
-            ? "A human player is still reconnecting."
-            : "Put at least one seat on each team.",
+    const started = commitLobbyMutation((current) => {
+      const local = localColorRef.current;
+      const connected = connectedRef.current;
+      const hasOpenSeat = PLAYER_COLORS.some(
+        (color) => current.seats[color].controller === "open",
       );
-      return;
+      const missingHuman = PLAYER_COLORS.some(
+        (color) =>
+          current.seats[color].controller === "human" &&
+          !humanSeatIsPresent(color, local, connected),
+      );
+      const hasInvalidTeams =
+        current.mode === "teams" &&
+        new Set(
+          PLAYER_COLORS.map((color) =>
+            teamOf(color, current.teamAssignments),
+          ),
+        ).size < 2;
+      if (hasOpenSeat || missingHuman || hasInvalidTeams) {
+        setNotice(
+          hasOpenSeat
+            ? "Fill all four seats before starting."
+            : missingHuman
+              ? "A human player is still reconnecting."
+              : "Put at least one seat on each team.",
+        );
+        return current;
+      }
+      return startGame(current);
+    });
+    if (started?.phase === "playing") {
+      setSelected(null);
+      setView("game");
     }
-    const started = startGame(game);
-    commitState(started);
-    setSelected(null);
-    setView("game");
   };
 
   const activeSelection =
@@ -948,6 +1011,47 @@ export function CrossboardApp() {
     setSelected(null);
   };
 
+  const undoTurn = () => {
+    const current = gameRef.current;
+    if (!current || !getUndoActionCount(current)) {
+      return;
+    }
+
+    const currentCoordinator = electCoordinator(
+      current,
+      localColorRef.current,
+      connectedRef.current,
+    );
+    if (isNetworked && currentCoordinator !== localColorRef.current) {
+      const mesh = meshRef.current;
+      if (!mesh) {
+        setNotice("The room is reconnecting. Try undo again in a moment.");
+        return;
+      }
+      mesh.sendTo(seatPeerId(current.roomCode, currentCoordinator), {
+        type: "undo-request",
+        sender: mesh.localPeerId,
+        stateHash: current.stateHash,
+      });
+      setNotice("Rewinding the shared turn…");
+      return;
+    }
+
+    const next = undoLastTurn(current);
+    if (next === current) {
+      return;
+    }
+    const undoneMoves = current.history.length - next.history.length;
+    commitState(next);
+    setSelected(null);
+    setView("game");
+    setNotice(
+      undoneMoves > 1
+        ? `Rewound ${undoneMoves} moves, including the computer replies.`
+        : "Rewound the last move.",
+    );
+  };
+
   const legalDestinations = useMemo(
     () =>
       game && activeSelection
@@ -955,6 +1059,7 @@ export function CrossboardApp() {
         : [],
     [activeSelection, game],
   );
+  const undoActionCount = game ? getUndoActionCount(game) : 0;
 
   const humanCount = game
     ? PLAYER_COLORS.filter(
@@ -1051,13 +1156,35 @@ export function CrossboardApp() {
                 Create {selectedGame === "chess" ? "chess" : "checkers"} room{" "}
                 <span aria-hidden="true">→</span>
               </button>
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => startPractice(selectedGame)}
-              >
-                Practice vs computers
-              </button>
+              {selectedGame === "chess" ? (
+                <>
+                  <button
+                    className="secondary-button practice-button"
+                    type="button"
+                    onClick={() => startPractice("teams", "chess")}
+                  >
+                    <span>Practice teams</span>
+                    <small>You + Yellow vs Blue + Green</small>
+                  </button>
+                  <button
+                    className="secondary-button practice-button"
+                    type="button"
+                    onClick={() => startPractice("ffa", "chess")}
+                  >
+                    <span>Practice free-for-all</span>
+                    <small>Three computer rivals</small>
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="secondary-button practice-button"
+                  type="button"
+                  onClick={() => startPractice("ffa", "checkers")}
+                >
+                  <span>Set up checkers practice</span>
+                  <small>Choose teams and variation before play</small>
+                </button>
+              )}
             </div>
             <div className="promise-row" aria-label="Game features">
               <span>
@@ -1612,9 +1739,26 @@ export function CrossboardApp() {
           </div>
 
           <div className="board-controls">
-            <button type="button" onClick={rotateBoard}>
-              <span aria-hidden="true">↻</span> Rotate board
-            </button>
+            <div className="board-control-actions">
+              <button type="button" onClick={rotateBoard}>
+                <span aria-hidden="true">↻</span> Rotate board
+              </button>
+              <button
+                className="undo-button"
+                type="button"
+                disabled={!undoActionCount}
+                title={
+                  !undoActionCount
+                    ? "Make a move before using undo"
+                    : isNetworked && coordinator !== localColor
+                      ? `Rewind the shared turn through ${game.seats[coordinator].name}`
+                      : "Rewind the latest human turn and any computer replies"
+                }
+                onClick={undoTurn}
+              >
+                <span aria-hidden="true">↶</span> Undo turn
+              </button>
+            </div>
             <span>
               Viewing from <b>{POSITION_LABELS[orientation]}</b>
             </span>
@@ -1729,8 +1873,9 @@ export function CrossboardApp() {
               <summary>Checkers rules · {game.checkersRules.preset}</summary>
               <ul>
                 <li>
-                  Warm teammates and Cool teammates block one another and
-                  can’t be captured.
+                  {game.mode === "teams"
+                    ? "Warm teammates and Cool teammates block one another and can’t be captured."
+                    : "Every other color can be captured in free-for-all."}
                 </li>
                 <li>
                   {game.checkersRules.flyingKings
@@ -1752,6 +1897,12 @@ export function CrossboardApp() {
                 <li>
                   A color is out when it has no pieces or no legal move.
                 </li>
+                {game.checkersRules.preset === "international" ? (
+                  <li>
+                    Captured pieces stay as blockers until the jump sequence
+                    ends; a new king activates on the following turn.
+                  </li>
+                ) : null}
               </ul>
             </details>
           ) : (

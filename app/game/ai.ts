@@ -1,6 +1,8 @@
 import {
   applyMove,
+  gameKindOf,
   getAllLegalMoves,
+  passTurn,
   squareKey,
   teamOf,
 } from "./engine";
@@ -60,8 +62,14 @@ function evaluate(state: GameState, perspective: PlayerColor): number {
     yellow: 0,
     green: 0,
   };
+  const pendingCaptured = new Set(
+    state.pendingCapturedSquares.map(squareKey),
+  );
 
   for (const [key, piece] of Object.entries(state.board)) {
+    if (pendingCaptured.has(key)) {
+      continue;
+    }
     const [row, col] = key.split(",").map(Number);
     totals[piece.color] +=
       PIECE_VALUES[piece.type] + positionalValue(piece.type, row, col);
@@ -147,6 +155,18 @@ function search(
   const branchLimit = depth >= 3 ? 9 : depth === 2 ? 7 : 5;
   const moves = orderedMoves(state, actor, branchLimit);
   if (!moves.length) {
+    if (gameKindOf(state) === "checkers") {
+      const advanced = passTurn(state, actor);
+      if (advanced !== state) {
+        return search(
+          advanced,
+          depth - 1,
+          perspective,
+          alpha,
+          beta,
+        );
+      }
+    }
     return evaluate(state, perspective) - (actor === perspective ? 350 : 0);
   }
 
@@ -155,7 +175,13 @@ function search(
     for (const move of moves) {
       value = Math.max(
         value,
-        search(applyMove(state, move), depth - 1, perspective, alpha, beta),
+        search(
+          applyMove(state, move, false),
+          depth - 1,
+          perspective,
+          alpha,
+          beta,
+        ),
       );
       alpha = Math.max(alpha, value);
       if (alpha >= beta) {
@@ -169,7 +195,13 @@ function search(
   for (const move of moves) {
     value = Math.min(
       value,
-      search(applyMove(state, move), depth - 1, perspective, alpha, beta),
+      search(
+        applyMove(state, move, false),
+        depth - 1,
+        perspective,
+        alpha,
+        beta,
+      ),
     );
     beta = Math.min(beta, value);
     if (alpha >= beta) {
@@ -191,7 +223,7 @@ export function chooseComputerMove(
   let bestMove = moves[0];
   let bestScore = -Infinity;
   for (const move of moves) {
-    const next = applyMove(state, move);
+    const next = applyMove(state, move, false);
     const score =
       search(next, 3, color, -Infinity, Infinity) +
       deterministicNoise(`${next.lastActionId}:${color}`) * 0.7;

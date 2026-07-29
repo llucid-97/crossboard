@@ -53,19 +53,29 @@ function boardCoordForDisplay(
   }
 }
 
-function focusDisplaySquare(row: number, col: number): void {
+function focusDisplaySquare(
+  row: number,
+  col: number,
+  rowStep: number,
+  colStep: number,
+): void {
   let nextRow = row;
   let nextCol = col;
-  for (let attempts = 0; attempts < BOARD_SIZE; attempts += 1) {
+  while (
+    nextRow >= 0 &&
+    nextRow < BOARD_SIZE &&
+    nextCol >= 0 &&
+    nextCol < BOARD_SIZE
+  ) {
     const target = document.querySelector<HTMLButtonElement>(
       `[data-display-square="${nextRow}-${nextCol}"]`,
     );
-    if (target) {
+    if (target && !target.disabled) {
       target.focus();
       return;
     }
-    nextRow = Math.max(0, Math.min(BOARD_SIZE - 1, nextRow));
-    nextCol = Math.max(0, Math.min(BOARD_SIZE - 1, nextCol));
+    nextRow += rowStep;
+    nextCol += colStep;
   }
 }
 
@@ -97,8 +107,10 @@ export function GameBoard({
     if (direction) {
       event.preventDefault();
       focusDisplaySquare(
-        Math.max(0, Math.min(BOARD_SIZE - 1, displayRow + direction[0])),
-        Math.max(0, Math.min(BOARD_SIZE - 1, displayCol + direction[1])),
+        displayRow + direction[0],
+        displayCol + direction[1],
+        direction[0],
+        direction[1],
       );
       return;
     }
@@ -165,7 +177,15 @@ export function GameBoard({
               legalMove ? ", legal destination" : ""
             }`}
             aria-selected={selectedSquare}
-            tabIndex={selectedSquare ? 0 : -1}
+            tabIndex={
+              selectedSquare ||
+              (!selected &&
+                interactive &&
+                displayRow === 0 &&
+                displayCol === 3)
+                ? 0
+                : -1
+            }
             disabled={!interactive && !selectedSquare}
             onClick={() => onSquarePress(coord)}
             onKeyDown={(event) => handleKeyDown(event, displayRow, displayCol)}

@@ -40,3 +40,30 @@
   identities are a future hardening step.
 - A room can recover while one human retains a snapshot. Cross-device cold
   recovery after everyone leaves would need a small persistence service.
+
+## Quality-of-life follow-up
+
+- [x] Add direct Teams practice with Yellow as the computer teammate.
+- [x] Keep free-for-all practice against three computer rivals.
+- [x] Add synchronized turn rewind with coordinator-serialized online requests.
+- [x] Migrate verified v1 recovery copies into the v2 room protocol.
+- [x] Publish and verify the controls on GitHub Pages.
+- [x] Remove the follow-up heartbeat after the live deployment is healthy.
+
+## Checkers integration
+
+- [x] Merge current `main` without regressing direct chess practice or shared
+  online undo.
+- [x] Move saves and peer IDs to schema/protocol v3, with verified v1/v2 chess
+  recovery migration.
+- [x] Make a checkers undo checkpoint cover the whole human capture chain and
+  following computer replies.
+- [x] Keep automatic no-move elimination out of the undo stack.
+- [x] Recheck both state hash and coordinator ownership inside delayed turns.
+- [x] Serialize all lobby edits and Start from the latest state ref.
+- [x] Implement FMJD-style deferred capture removal and promotion for the
+  International preset.
+- [x] Teach minimax to search through no-move elimination.
+- [x] Add migration, undo, timer, lobby-race, International-rules, tactical-AI,
+  and full hash-contract regressions.
+- [x] Pass worker build/tests, GitHub Pages export, TypeScript, and lint.

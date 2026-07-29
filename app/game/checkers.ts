@@ -41,7 +41,7 @@ export const CHECKERS_PRESETS: Record<
     backwardCaptures: true,
     mandatoryCapture: true,
     maximumCapture: true,
-    continueAfterCrowning: true,
+    continueAfterCrowning: false,
   },
   house: {
     preset: "house",
@@ -174,6 +174,12 @@ function simpleMovesForPiece(
   return moves;
 }
 
+function isPendingCapture(state: GameState, coord: Coord): boolean {
+  return state.pendingCapturedSquares.some((square) =>
+    sameSquare(square, coord),
+  );
+}
+
 export function checkersCapturesForPiece(
   state: GameState,
   from: Coord,
@@ -203,6 +209,9 @@ export function checkersCapturesForPiece(
             row += rowStep;
             col += colStep;
             continue;
+          }
+          if (isPendingCapture(state, current)) {
+            break;
           }
           if (
             areAllies(
@@ -247,6 +256,7 @@ export function checkersCapturesForPiece(
     const occupant = state.board[squareKey(jumped)];
     if (
       occupant &&
+      !isPendingCapture(state, jumped) &&
       !areAllies(
         piece.color,
         occupant.color,
@@ -268,8 +278,13 @@ function simulateCapture(state: GameState, move: Move): GameState {
   }
   const board: BoardState = { ...state.board };
   delete board[squareKey(move.from)];
-  delete board[squareKey(move.capturedSquare)];
+  const isInternational =
+    state.checkersRules.preset === "international";
+  if (!isInternational) {
+    delete board[squareKey(move.capturedSquare)];
+  }
   const promoted =
+    !isInternational &&
     movingPiece.type === "man" &&
     isCheckersPromotionSquare(movingPiece.color, move.to);
   board[squareKey(move.to)] = {
@@ -281,6 +296,9 @@ function simulateCapture(state: GameState, move: Move): GameState {
     ...state,
     board,
     continuationFrom: move.to,
+    pendingCapturedSquares: isInternational
+      ? [...state.pendingCapturedSquares, move.capturedSquare]
+      : [],
   };
 }
 

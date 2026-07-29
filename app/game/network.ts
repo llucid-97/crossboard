@@ -17,6 +17,11 @@ export type WireMessage =
       type: "ping";
       sender: string;
       revision: number;
+    }
+  | {
+      type: "undo-request";
+      sender: string;
+      stateHash: string;
     };
 
 export type SignalStatus = "connecting" | "online" | "degraded" | "offline";
@@ -28,7 +33,7 @@ export interface MeshCallbacks {
   onNotice: (message: string) => void;
 }
 
-const PEER_PREFIX = "crossboard-v1";
+const PEER_PREFIX = "crossboard-v3";
 
 function cleanRoomCode(roomCode: string): string {
   return roomCode.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -50,6 +55,9 @@ function isWireMessage(value: unknown): value is WireMessage {
     return false;
   }
   const type = (value as { type?: string }).type;
+  if (type === "undo-request") {
+    return typeof (value as { stateHash?: unknown }).stateHash === "string";
+  }
   return type === "state-request" || type === "snapshot" || type === "ping";
 }
 
@@ -320,6 +328,39 @@ export function electCoordinator(
   return elected ?? localColor;
 }
 
+export function coordinatorOwnsState(
+  state: GameState,
+  expectedStateHash: string,
+  localColor: PlayerColor,
+  connectedColors: PlayerColor[],
+): boolean {
+  return (
+    state.stateHash === expectedStateHash &&
+    electCoordinator(state, localColor, connectedColors) === localColor
+  );
+}
+
+export function undoRequesterFor(
+  state: GameState,
+  localColor: PlayerColor,
+  connectedColors: PlayerColor[],
+  remotePeerId: string,
+  baseStateHash: string,
+): PlayerColor | null {
+  const requester = colorFromPeerId(remotePeerId);
+  if (
+    state.phase === "lobby" ||
+    state.stateHash !== baseStateHash ||
+    !requester ||
+    seatPeerId(state.roomCode, requester) !== remotePeerId ||
+    state.seats[requester].controller !== "human" ||
+    electCoordinator(state, localColor, connectedColors) !== localColor
+  ) {
+    return null;
+  }
+  return requester;
+}
+
 export function shouldAdoptSnapshot(
   current: GameState,
   incoming: GameState,
@@ -330,11 +371,19 @@ export function shouldAdoptSnapshot(
 
   const currentChain = [
     ...current.lineage,
-    { revision: current.revision, stateHash: current.stateHash },
+    {
+      revision: current.revision,
+      stateHash: current.stateHash,
+      lastActionId: current.lastActionId,
+    },
   ];
   const incomingChain = [
     ...incoming.lineage,
-    { revision: incoming.revision, stateHash: incoming.stateHash },
+    {
+      revision: incoming.revision,
+      stateHash: incoming.stateHash,
+      lastActionId: incoming.lastActionId,
+    },
   ];
 
   if (incomingChain.some((entry) => entry.stateHash === current.stateHash)) {
@@ -366,6 +415,11 @@ export function shouldAdoptSnapshot(
     }
     if (!currentChild) {
       return true;
+    }
+    const incomingIsUndo = incomingChild.lastActionId?.startsWith("undo-");
+    const currentIsUndo = currentChild.lastActionId?.startsWith("undo-");
+    if (incomingIsUndo !== currentIsUndo) {
+      return !!incomingIsUndo;
     }
     return incomingChild.stateHash.localeCompare(currentChild.stateHash) < 0;
   }

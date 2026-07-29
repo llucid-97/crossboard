@@ -16,6 +16,7 @@ import {
   SeatMap,
   TeamAssignments,
   TEAM_LABELS,
+  UndoFrame,
 } from "./types";
 import {
   areAllies,
@@ -44,6 +45,8 @@ export {
 } from "./board";
 
 export { playerAppearance } from "./board";
+
+const MAX_UNDO_FRAMES = 8;
 
 const BACK_RANK: ChessPieceType[] = [
   "rook",
@@ -148,7 +151,7 @@ export function createGameState(
   gameKind: GameKind = "chess",
 ): GameState {
   const state: GameState = {
-    schemaVersion: 1,
+    schemaVersion: 3,
     ruleset:
       gameKind === "checkers"
         ? "crossboard-checkers-v1"
@@ -168,6 +171,8 @@ export function createGameState(
     eliminated: [],
     winners: null,
     continuationFrom: null,
+    pendingCapturedSquares: [],
+    undoStack: [],
     lastActionId: `room-${roomCode}`,
     parentHash: "genesis",
     stateHash: "",
@@ -204,6 +209,8 @@ export function startGame(state: GameState): GameState {
     eliminated: [],
     winners: null,
     continuationFrom: null,
+    pendingCapturedSquares: [],
+    undoStack: [],
     lastActionId: `start-${state.revision + 1}`,
   });
 }
@@ -436,7 +443,49 @@ function matchingLegalMove(state: GameState, move: Move): Move | undefined {
   );
 }
 
-function applyChessMove(state: GameState, move: Move): GameState {
+function appendUndoFrame(
+  state: GameState,
+  actor: PlayerColor,
+): UndoFrame[] {
+  const frame: UndoFrame = {
+    actor,
+    phase: state.phase,
+    board: { ...state.board },
+    turn: state.turn,
+    round: state.round,
+    historyLength: state.history.length,
+    eliminated: [...state.eliminated],
+    winners: state.winners ? [...state.winners] : null,
+    continuationFrom: state.continuationFrom
+      ? { ...state.continuationFrom }
+      : null,
+    pendingCapturedSquares: state.pendingCapturedSquares.map((square) => ({
+      ...square,
+    })),
+  };
+  return [...(state.undoStack ?? []), frame].slice(-MAX_UNDO_FRAMES);
+}
+
+function undoStackAfterMove(
+  state: GameState,
+  actor: PlayerColor,
+  recordUndo: boolean,
+  beginsTurn = true,
+): UndoFrame[] | undefined {
+  if (!recordUndo) {
+    return [];
+  }
+  if (state.seats[actor].controller !== "human" || !beginsTurn) {
+    return state.undoStack;
+  }
+  return appendUndoFrame(state, actor);
+}
+
+function applyChessMove(
+  state: GameState,
+  move: Move,
+  recordUndo: boolean,
+): GameState {
   const movingPiece = state.board[squareKey(move.from)];
   if (
     state.phase !== "playing" ||
@@ -512,6 +561,11 @@ function applyChessMove(state: GameState, move: Move): GameState {
     revision,
     round: state.round + (wrapped ? 1 : 0),
     history: [...state.history, record],
+    undoStack: undoStackAfterMove(
+      state,
+      movingPiece.color,
+      recordUndo,
+    ),
     eliminated,
     winners,
     phase: winners ? "finished" : "playing",
@@ -520,7 +574,11 @@ function applyChessMove(state: GameState, move: Move): GameState {
   });
 }
 
-function applyCheckersMove(state: GameState, requestedMove: Move): GameState {
+function applyCheckersMove(
+  state: GameState,
+  requestedMove: Move,
+  recordUndo: boolean,
+): GameState {
   const movingPiece = state.board[squareKey(requestedMove.from)];
   const move = matchingLegalMove(state, requestedMove);
   if (
@@ -536,52 +594,86 @@ function applyCheckersMove(state: GameState, requestedMove: Move): GameState {
   const board: BoardState = { ...state.board };
   delete board[squareKey(move.from)];
 
+  const isInternational =
+    state.checkersRules.preset === "international";
   const captured = move.capturedSquare
     ? board[squareKey(move.capturedSquare)]
     : undefined;
-  if (move.capturedSquare) {
+  if (move.capturedSquare && !isInternational) {
     delete board[squareKey(move.capturedSquare)];
   }
 
-  const promoted =
+  const immediatelyPromoted =
+    !isInternational &&
     movingPiece.type === "man" &&
     isCheckersPromotionSquare(movingPiece.color, move.to);
   board[squareKey(move.to)] = {
     ...movingPiece,
-    type: promoted ? "crowned" : movingPiece.type,
+    type: immediatelyPromoted ? "crowned" : movingPiece.type,
     hasMoved: true,
   };
 
-  const eliminated = [...state.eliminated];
-  if (
-    captured &&
-    !eliminated.includes(captured.color) &&
-    !Object.values(board).some((piece) => piece.color === captured.color)
-  ) {
-    eliminated.push(captured.color);
-  }
-  const eliminatedColor =
-    captured && eliminated.includes(captured.color) &&
-    !state.eliminated.includes(captured.color)
-      ? captured.color
-      : undefined;
-  const winners = determineWinners(
-    state.mode,
-    eliminated,
-    state.teamAssignments,
-  );
+  const pendingCapturedSquares =
+    isInternational && move.capturedSquare
+      ? [...state.pendingCapturedSquares, move.capturedSquare]
+      : [];
   const canContinueAfterPromotion =
-    !promoted || state.checkersRules.continueAfterCrowning;
+    !immediatelyPromoted || state.checkersRules.continueAfterCrowning;
   const continuationState: GameState = {
     ...state,
     board,
     continuationFrom: move.to,
+    pendingCapturedSquares,
   };
   const continuationMoves =
-    move.capturedSquare && canContinueAfterPromotion && !winners
+    move.capturedSquare && canContinueAfterPromotion
       ? getCheckersLegalMovesForPiece(continuationState, move.to)
       : [];
   const continued = continuationMoves.length > 0;
+
+  if (isInternational && !continued) {
+    pendingCapturedSquares.forEach((square) => {
+      delete board[squareKey(square)];
+    });
+    const pieceAtDestination = board[squareKey(move.to)];
+    if (
+      pieceAtDestination?.type === "man" &&
+      isCheckersPromotionSquare(pieceAtDestination.color, move.to)
+    ) {
+      board[squareKey(move.to)] = {
+        ...pieceAtDestination,
+        type: "crowned",
+      };
+    }
+  }
+
+  const promoted =
+    movingPiece.type === "man" &&
+    board[squareKey(move.to)]?.type === "crowned";
+  const eliminated = [...state.eliminated];
+  if (!continued) {
+    for (const color of PLAYER_COLORS) {
+      if (
+        !eliminated.includes(color) &&
+        !Object.values(board).some((piece) => piece.color === color)
+      ) {
+        eliminated.push(color);
+      }
+    }
+  }
+  const eliminatedColor =
+    captured &&
+    eliminated.includes(captured.color) &&
+    !state.eliminated.includes(captured.color)
+      ? captured.color
+      : undefined;
+  const winners = continued
+    ? null
+    : determineWinners(
+        state.mode,
+        eliminated,
+        state.teamAssignments,
+      );
   const nextTurn = continued
     ? state.turn
     : nextActiveColor(state.turn, eliminated);
@@ -611,18 +703,29 @@ function applyCheckersMove(state: GameState, requestedMove: Move): GameState {
     revision,
     round: state.round + (wrapped ? 1 : 0),
     history: [...state.history, record],
+    undoStack: undoStackAfterMove(
+      state,
+      movingPiece.color,
+      recordUndo,
+      state.continuationFrom === null,
+    ),
     eliminated,
     winners,
     phase: winners ? "finished" : "playing",
     continuationFrom: continued ? move.to : null,
+    pendingCapturedSquares: continued ? pendingCapturedSquares : [],
     lastActionId: record.id,
   });
 }
 
-export function applyMove(state: GameState, move: Move): GameState {
+export function applyMove(
+  state: GameState,
+  move: Move,
+  recordUndo = true,
+): GameState {
   return gameKindOf(state) === "checkers"
-    ? applyCheckersMove(state, move)
-    : applyChessMove(state, move);
+    ? applyCheckersMove(state, move, recordUndo)
+    : applyChessMove(state, move, recordUndo);
 }
 
 export function passTurn(state: GameState, color: PlayerColor): GameState {
@@ -675,6 +778,43 @@ export function passTurn(state: GameState, color: PlayerColor): GameState {
   });
 }
 
+export function getUndoActionCount(state: GameState): number {
+  return state.undoStack?.length ? 1 : 0;
+}
+
+export function undoLastTurn(state: GameState): GameState {
+  if (state.phase === "lobby") {
+    return state;
+  }
+  const stack = state.undoStack ?? [];
+  if (!getUndoActionCount(state)) {
+    return state;
+  }
+
+  const frameIndex = stack.length - 1;
+  const frame = stack[frameIndex];
+  const revision = state.revision + 1;
+  return stampState(state, {
+    ...state,
+    phase: frame.phase,
+    board: { ...frame.board },
+    turn: frame.turn,
+    revision,
+    round: frame.round,
+    history: state.history.slice(0, frame.historyLength),
+    undoStack: stack.slice(0, frameIndex),
+    eliminated: [...frame.eliminated],
+    winners: frame.winners ? [...frame.winners] : null,
+    continuationFrom: frame.continuationFrom
+      ? { ...frame.continuationFrom }
+      : null,
+    pendingCapturedSquares: (frame.pendingCapturedSquares ?? []).map(
+      (square) => ({ ...square }),
+    ),
+    lastActionId: `undo-${revision}-${frame.actor}`,
+  });
+}
+
 export function updateLobby(
   state: GameState,
   updates: Partial<
@@ -697,6 +837,34 @@ export function updateLobby(
   });
 }
 
+export function createPracticeGame(
+  mode: GameMode,
+  localName = "You",
+  gameKind: GameKind = "chess",
+): GameState {
+  const initial = createGameState("PRACTICE", mode, localName, gameKind);
+  const seats = { ...initial.seats };
+  PLAYER_COLORS.forEach((color) => {
+    if (color !== "red") {
+      seats[color] = {
+        color,
+        controller: "computer",
+        name: `Computer ${COLOR_LABELS[color]}`,
+      };
+    }
+  });
+  return startGame(
+    updateLobby(
+      initial,
+      {
+        mode,
+        seats,
+      },
+      `practice-${gameKind}-${mode}`,
+    ),
+  );
+}
+
 export function describeWinner(state: GameState): string {
   if (!state.winners?.length) {
     return "Game over";
@@ -712,8 +880,8 @@ export function getStateSignature(state: GameState): string {
   return `${state.revision}:${state.stateHash}`;
 }
 
-function stableStatePayload(state: GameState): string {
-  const board = Object.entries(state.board)
+function stableBoardPayload(boardState: BoardState) {
+  return Object.entries(boardState)
     .sort(([first], [second]) => first.localeCompare(second))
     .map(([square, piece]) => [
       square,
@@ -722,14 +890,83 @@ function stableStatePayload(state: GameState): string {
       piece.type,
       piece.hasMoved ? 1 : 0,
     ]);
+}
+
+function stableSeatsPayload(state: GameState) {
+  return PLAYER_COLORS.map((color) => {
+    const seat = state.seats[color];
+    return [color, seat.controller, seat.name, seat.peerId ?? ""];
+  });
+}
+
+function legacyHistoryPayload(historyState: MoveRecord[]) {
+  return historyState.map((move) => [
+    move.id,
+    move.revision,
+    move.color,
+    move.piece,
+    move.from.row,
+    move.from.col,
+    move.to.row,
+    move.to.col,
+    move.captured ?? "",
+    move.eliminated ?? "",
+  ]);
+}
+
+function legacyStatePayload(state: GameState): string {
+  const payload = {
+    schemaVersion: (state as unknown as { schemaVersion: number })
+      .schemaVersion,
+    ruleset: state.ruleset,
+    roomCode: state.roomCode,
+    mode: state.mode,
+    phase: state.phase,
+    board: stableBoardPayload(state.board),
+    seats: stableSeatsPayload(state),
+    turn: state.turn,
+    revision: state.revision,
+    round: state.round,
+    history: legacyHistoryPayload(state.history),
+    eliminated: state.eliminated,
+    winners: state.winners,
+    lastActionId: state.lastActionId,
+    parentHash: state.parentHash,
+    lineage: state.lineage,
+  };
+  const undoStack = state.undoStack?.map((frame) => [
+    frame.actor,
+    frame.phase,
+    stableBoardPayload(frame.board),
+    frame.turn,
+    frame.round,
+    frame.historyLength,
+    frame.eliminated,
+    frame.winners,
+  ]);
+  return JSON.stringify(
+    undoStack === undefined ? payload : { ...payload, undoStack },
+  );
+}
+
+function stableStatePayload(state: GameState): string {
+  const schemaVersion = (
+    state as unknown as { schemaVersion: number }
+  ).schemaVersion;
+  if (schemaVersion < 3) {
+    return legacyStatePayload(state);
+  }
+
+  const board = stableBoardPayload(state.board);
   const seats = PLAYER_COLORS.map((color) => {
     const seat = state.seats[color];
     return [color, seat.controller, seat.name, seat.peerId ?? ""];
   });
   const history = state.history.map((move) => {
-    const legacy = [
+    return [
       move.id,
       move.revision,
+      move.round,
       move.color,
       move.piece,
       move.from.row,
@@ -738,31 +975,22 @@ function stableStatePayload(state: GameState): string {
       move.to.col,
       move.captured ?? "",
       move.eliminated ?? "",
+      move.capturedColor ?? "",
+      move.capturedSquare?.row ?? "",
+      move.capturedSquare?.col ?? "",
+      move.promotion ?? "",
+      move.continued ? 1 : 0,
+      move.notation,
     ];
-    return state.gameKind
-      ? [
-          ...legacy,
-          move.capturedColor ?? "",
-          move.capturedSquare?.row ?? "",
-          move.capturedSquare?.col ?? "",
-          move.promotion ?? "",
-          move.continued ? 1 : 0,
-        ]
-      : legacy;
   });
-  return JSON.stringify({
+  const payload = {
     schemaVersion: state.schemaVersion,
     ruleset: state.ruleset,
-    ...(state.gameKind
-      ? {
-          gameKind: state.gameKind,
-          checkersRules: state.checkersRules,
-          continuationFrom: state.continuationFrom,
-        }
-      : {}),
+    gameKind: state.gameKind,
     roomCode: state.roomCode,
     mode: state.mode,
     teamAssignments: state.teamAssignments,
+    checkersRules: state.checkersRules,
     phase: state.phase,
     board,
     seats,
@@ -772,10 +1000,27 @@ function stableStatePayload(state: GameState): string {
     history,
     eliminated: state.eliminated,
     winners: state.winners,
+    continuationFrom: state.continuationFrom,
+    pendingCapturedSquares: state.pendingCapturedSquares,
     lastActionId: state.lastActionId,
     parentHash: state.parentHash,
     lineage: state.lineage,
-  });
+  };
+  const undoStack = state.undoStack?.map((frame) => [
+    frame.actor,
+    frame.phase,
+    stableBoardPayload(frame.board),
+    frame.turn,
+    frame.round,
+    frame.historyLength,
+    frame.eliminated,
+    frame.winners,
+    frame.continuationFrom,
+    frame.pendingCapturedSquares,
+  ]);
+  return JSON.stringify(
+    undoStack === undefined ? payload : { ...payload, undoStack },
+  );
 }
 
 export function calculateStateHash(state: GameState): string {
@@ -792,6 +1037,97 @@ export function calculateStateHash(state: GameState): string {
     .padStart(8, "0")}`;
 }
 
+export function normalizeGameState(value: unknown): GameState | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as Record<string, unknown>;
+  const schemaVersion = candidate.schemaVersion;
+  if (
+    typeof schemaVersion !== "number" ||
+    ![1, 2, 3].includes(schemaVersion)
+  ) {
+    return null;
+  }
+
+  if (schemaVersion === 3) {
+    if (
+      (candidate.gameKind !== "chess" &&
+        candidate.gameKind !== "checkers") ||
+      (candidate.ruleset !== "crossboard-capture-v1" &&
+        candidate.ruleset !== "crossboard-checkers-v1") ||
+      (candidate.gameKind === "chess" &&
+        candidate.ruleset !== "crossboard-capture-v1") ||
+      (candidate.gameKind === "checkers" &&
+        candidate.ruleset !== "crossboard-checkers-v1") ||
+      !candidate.teamAssignments ||
+      typeof candidate.teamAssignments !== "object" ||
+      !candidate.checkersRules ||
+      typeof candidate.checkersRules !== "object" ||
+      !Array.isArray(candidate.pendingCapturedSquares) ||
+      !Array.isArray(candidate.undoStack) ||
+      !(candidate.undoStack as unknown[]).every(
+        (frame) =>
+          !!frame &&
+          typeof frame === "object" &&
+          Array.isArray(
+            (frame as { pendingCapturedSquares?: unknown })
+              .pendingCapturedSquares,
+          ),
+      )
+    ) {
+      return null;
+    }
+    const current = candidate as unknown as GameState;
+    try {
+      return calculateStateHash(current) === current.stateHash
+        ? current
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  if (
+    candidate.ruleset !== "crossboard-capture-v1" ||
+    (schemaVersion === 2 && !Array.isArray(candidate.undoStack))
+  ) {
+    return null;
+  }
+  const legacy = candidate as unknown as GameState;
+  try {
+    if (calculateStateHash(legacy) !== legacy.stateHash) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  const undoStack =
+    schemaVersion === 2
+      ? (legacy.undoStack ?? []).map((frame) => ({
+          ...frame,
+          continuationFrom: null,
+          pendingCapturedSquares: [],
+        }))
+      : [];
+  const revision = legacy.revision + 1;
+  const migrated: GameState = {
+    ...legacy,
+    schemaVersion: 3,
+    ruleset: "crossboard-capture-v1",
+    gameKind: "chess",
+    teamAssignments: { ...DEFAULT_TEAM_ASSIGNMENTS },
+    checkersRules: { ...DEFAULT_CHECKERS_RULES },
+    continuationFrom: null,
+    pendingCapturedSquares: [],
+    undoStack,
+    revision,
+    lastActionId: `upgrade-v${schemaVersion}-to-v3-${revision}`,
+  };
+  return stampState(legacy, migrated);
+}
+
 function stampState(previous: GameState, next: GameState): GameState {
   const stamped = {
     ...next,
@@ -799,7 +1135,11 @@ function stampState(previous: GameState, next: GameState): GameState {
     stateHash: "",
     lineage: [
       ...previous.lineage,
-      { revision: previous.revision, stateHash: previous.stateHash },
+      {
+        revision: previous.revision,
+        stateHash: previous.stateHash,
+        lastActionId: previous.lastActionId,
+      },
     ].slice(-64),
   };
   return { ...stamped, stateHash: calculateStateHash(stamped) };

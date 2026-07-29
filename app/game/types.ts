@@ -73,6 +73,19 @@ export interface Seat {
 export type SeatMap = Record<PlayerColor, Seat>;
 export type BoardState = Record<string, Piece>;
 
+export interface UndoFrame {
+  actor: PlayerColor;
+  phase: GamePhase;
+  board: BoardState;
+  turn: PlayerColor;
+  round: number;
+  historyLength: number;
+  eliminated: PlayerColor[];
+  winners: PlayerColor[] | null;
+  continuationFrom: Coord | null;
+  pendingCapturedSquares: Coord[];
+}
+
 export const DEFAULT_TEAM_ASSIGNMENTS: TeamAssignments = {
   red: "warm",
   blue: "cool",
@@ -81,7 +94,7 @@ export const DEFAULT_TEAM_ASSIGNMENTS: TeamAssignments = {
 };
 
 export interface GameState {
-  schemaVersion: 1;
+  schemaVersion: 3;
   ruleset: "crossboard-capture-v1" | "crossboard-checkers-v1";
   gameKind: GameKind;
   roomCode: string;
@@ -98,10 +111,16 @@ export interface GameState {
   eliminated: PlayerColor[];
   winners: PlayerColor[] | null;
   continuationFrom: Coord | null;
+  pendingCapturedSquares: Coord[];
+  undoStack?: UndoFrame[];
   lastActionId: string;
   parentHash: string;
   stateHash: string;
-  lineage: Array<{ revision: number; stateHash: string }>;
+  lineage: Array<{
+    revision: number;
+    stateHash: string;
+    lastActionId?: string;
+  }>;
 }
 
 export const COLOR_LABELS: Record<PlayerColor, string> = {

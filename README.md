@@ -1,8 +1,8 @@
 # Crossboard
 
 Crossboard is a casual four-player chess and checkers collection for the
-browser. It supports free-for-all games, opposite-seat teams, open invite
-seats, and computer opponents. Human players exchange moves directly over
+browser. It supports free-for-all games, configurable Warm/Cool teams, open
+invite seats, and computer opponents. Human players exchange moves directly over
 WebRTC; no player's machine needs to remain a permanent host.
 
 ## What is included
@@ -11,15 +11,19 @@ WebRTC; no player's machine needs to remain a permanent host.
 - A responsive 14×14 cross board with four chess armies or four sets of twelve
   checkers.
 - **Free-for-all:** survive as the last active color.
-- **Teams:** Red + Yellow versus Blue + Green. Checkers teammates block one
-  another and cannot capture each other.
+- **Teams:** Red + Yellow versus Blue + Green by default, with every seat
+  assignable to either side. Checkers teammates block one another and cannot
+  capture each other.
 - American, International, and House checkers presets, plus switches for flying
   kings, backward captures, mandatory captures, longest capture, and continuing
   after crowning.
 - A deterministic, beam-limited four-ply minimax bot tuned for casual play.
+- One-click Teams practice with a computer teammate, or free-for-all practice
+  against three computer rivals.
 - PeerJS room discovery and a full browser-to-browser state mesh.
 - Hash-chained snapshots, deterministic fork resolution, local recovery copies,
   and automatic coordinator election.
+- Shared undo that rewinds the latest human decision and any computer replies.
 - Touch/click movement, keyboard-friendly squares, legal-move hints, move
   history, reconnect notices, and mobile legal-move controls.
 
@@ -45,8 +49,12 @@ man crowns on the far edge. A color is eliminated when it has no pieces or no
 legal move.
 
 The room coordinator can choose a familiar preset or mix individual variation
-rules. In Teams, opposite-seat partners always count as friendly blockers, so a
+rules. In Teams, every same-side piece counts as a friendly blocker, so a
 capture can never jump or remove a teammate.
+
+The International preset defers captured-piece removal until a complete jump
+sequence ends and only activates a new king after that turn, matching the FMJD
+multiple-capture rules. House rules can still crown and continue immediately.
 
 ## How rooms stay online
 
@@ -54,7 +62,12 @@ The deployed site serves the app, while PeerJS Cloud performs the initial
 WebRTC handshake. Moves and snapshots then travel directly among the connected
 browsers. Every human has the current position, and the lowest connected human
 seat coordinates lobby controls and computer turns. If that browser leaves, the
-next human seat takes over.
+next human seat takes over. Online undo requests also pass through that
+coordinator, which publishes the rewound position to everyone as a new shared
+state.
+
+The current room/save protocol is schema v3. Verified schema-v1 and schema-v2
+chess recovery copies migrate locally before joining the v3 peer mesh.
 
 The app also saves a recovery copy in each player's browser. If every human
 closes the room, another device cannot resurrect it without a small persistence

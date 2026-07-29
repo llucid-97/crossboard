@@ -7,9 +7,11 @@ import {
   createGameState,
   getAllLegalMoves,
   getLegalMovesForPiece,
+  normalizeGameState,
   passTurn,
   squareKey,
   startGame,
+  undoLastTurn,
   updateLobby,
 } from "../app/game/engine";
 import {
@@ -275,6 +277,69 @@ test("captures chain with the same checker before the turn advances", () => {
   assert.equal(third.history.length, 2);
 });
 
+test("one undo restores the position before a whole human capture chain and bot reply", () => {
+  const opening = position("ffa", {
+    "8,3": checker("red", "red"),
+    "7,4": checker("blue", "blue"),
+    "5,6": checker("green", "green"),
+    "0,3": checker("yellow", "yellow"),
+  });
+  const firstJump = applyMove(opening, {
+    from: { row: 8, col: 3 },
+    to: { row: 6, col: 5 },
+  });
+  assert.equal(firstJump.undoStack?.length, 1);
+  assert.deepEqual(firstJump.undoStack?.[0].continuationFrom, null);
+
+  const completedTurn = applyMove(firstJump, {
+    from: { row: 6, col: 5 },
+    to: { row: 4, col: 7 },
+  });
+  assert.equal(completedTurn.undoStack?.length, 1);
+  const botMove = getAllLegalMoves(completedTurn, "yellow")[0];
+  assert.ok(botMove);
+  const afterBot = applyMove(completedTurn, botMove);
+  assert.equal(afterBot.undoStack?.length, 1);
+
+  const restored = undoLastTurn(afterBot);
+  assert.deepEqual(restored.board, opening.board);
+  assert.equal(restored.turn, opening.turn);
+  assert.equal(restored.history.length, opening.history.length);
+  assert.equal(restored.continuationFrom, null);
+  assert.deepEqual(restored.pendingCapturedSquares, []);
+});
+
+test("automatic no-move elimination preserves the prior human undo checkpoint", () => {
+  const base = position("ffa", {
+      "8,3": checker("red", "red"),
+      "3,0": checker("blue", "trapped-blue"),
+      "4,1": checker("red", "blue-blocker"),
+      "5,2": checker("yellow", "landing-blocker"),
+      "0,9": checker("yellow", "yellow"),
+      "3,13": checker("green", "green"),
+    });
+  const opening: GameState = {
+    ...base,
+    checkersRules: checkersRulesForPreset("american"),
+    stateHash: "",
+  };
+  opening.stateHash = calculateStateHash(opening);
+  const moved = applyMove(opening, {
+    from: { row: 8, col: 3 },
+    to: { row: 7, col: 4 },
+  });
+  assert.equal(moved.turn, "blue");
+  assert.deepEqual(getAllLegalMoves(moved, "blue"), []);
+  assert.equal(moved.undoStack?.length, 1);
+
+  const eliminated = passTurn(moved, "blue");
+  assert.equal(eliminated.undoStack?.length, 1);
+  const restored = undoLastTurn(eliminated);
+  assert.deepEqual(restored.board, opening.board);
+  assert.deepEqual(restored.eliminated, opening.eliminated);
+  assert.equal(restored.turn, "red");
+});
+
 test("capturing both opponents ends a team game but never removes an ally", () => {
   const first = position("teams", {
     "8,3": checker("red", "red"),
@@ -343,6 +408,68 @@ test("a rules option controls whether crowning continues a capture chain", () =>
   });
   assert.equal(stopped.continuationFrom, null);
   assert.equal(stopped.turn, "yellow");
+});
+
+test("International captured pieces block reverse flying routes until the chain ends", () => {
+  const state: GameState = {
+    ...position("ffa", {
+      "8,3": checker("red", "red-king", "crowned"),
+      "6,5": checker("blue", "blue"),
+      "9,2": checker("green", "green"),
+      "0,9": checker("yellow", "yellow"),
+    }),
+    checkersRules: checkersRulesForPreset("international"),
+  };
+  const next = applyMove(state, {
+    from: { row: 8, col: 3 },
+    to: { row: 5, col: 6 },
+  });
+
+  assert.equal(next.continuationFrom, null);
+  assert.deepEqual(next.pendingCapturedSquares, []);
+  assert.equal(next.board["6,5"], undefined);
+  assert.ok(next.board["9,2"]);
+});
+
+test("International men do not gain flying-king movement during a capture", () => {
+  const state: GameState = {
+    ...position("ffa", {
+      "2,3": checker("red", "red"),
+      "1,4": checker("blue", "blue"),
+      "2,7": checker("green", "distant-green"),
+      "0,9": checker("yellow", "yellow"),
+    }),
+    checkersRules: checkersRulesForPreset("international"),
+  };
+  const crownedAtTurnEnd = applyMove(state, {
+    from: { row: 2, col: 3 },
+    to: { row: 0, col: 5 },
+  });
+  assert.equal(crownedAtTurnEnd.continuationFrom, null);
+  assert.equal(crownedAtTurnEnd.board["0,5"].type, "crowned");
+  assert.ok(crownedAtTurnEnd.board["2,7"]);
+
+  const adjacentState: GameState = {
+    ...state,
+    board: {
+      "2,3": checker("red", "red"),
+      "1,4": checker("blue", "blue"),
+      "1,6": checker("green", "adjacent-green"),
+      "0,9": checker("yellow", "yellow"),
+    },
+  };
+  const midChain = applyMove(adjacentState, {
+    from: { row: 2, col: 3 },
+    to: { row: 0, col: 5 },
+  });
+  assert.deepEqual(midChain.continuationFrom, { row: 0, col: 5 });
+  assert.equal(midChain.board["0,5"].type, "man");
+  const finished = applyMove(midChain, {
+    from: { row: 0, col: 5 },
+    to: { row: 2, col: 7 },
+  });
+  assert.equal(finished.board["2,7"].type, "man");
+  assert.equal(finished.continuationFrom, null);
 });
 
 test("flying kings may land on any clear square beyond one opponent", () => {
@@ -425,6 +552,40 @@ test("the casual bot returns the same legal checkers move every time", () => {
   );
 });
 
+test("the bot sees a no-move elimination as an immediate tactical win", () => {
+  const state: GameState = {
+    ...position(
+      "teams",
+      {
+        "4,1": checker("red", "red-blocker"),
+        "8,3": checker("red", "red-mover"),
+        "3,0": checker("blue", "trapped-blue"),
+        "5,2": checker("yellow", "landing-blocker"),
+        "0,9": checker("yellow", "yellow"),
+      },
+      "red",
+    ),
+    eliminated: ["green"],
+    checkersRules: checkersRulesForPreset("american"),
+  };
+  const allMoves = getAllLegalMoves(state, "red");
+  assert.ok(
+    allMoves.some((move) => squareKey(move.from) === "4,1"),
+  );
+  assert.ok(
+    allMoves.some((move) => squareKey(move.from) === "8,3"),
+  );
+
+  const winningMove = chooseComputerMove(state, "red");
+  assert.ok(winningMove);
+  assert.equal(squareKey(winningMove.from), "8,3");
+  const afterMove = applyMove(state, winningMove, false);
+  assert.deepEqual(getAllLegalMoves(afterMove, "blue"), []);
+  const won = passTurn(afterMove, "blue");
+  assert.equal(won.phase, "finished");
+  assert.deepEqual(won.winners, ["red", "yellow"]);
+});
+
 test("changing a replicated checkers option changes the deterministic hash", () => {
   const initial = createGameState(
     "CHECKERS-HASH",
@@ -446,4 +607,104 @@ test("changing a replicated checkers option changes the deterministic hash", () 
   assert.equal(changed.parentHash, initial.stateHash);
   assert.notEqual(changed.stateHash, initial.stateHash);
   assert.equal(calculateStateHash(changed), changed.stateHash);
+});
+
+test("schema v3 hashes every replicated checkers and move-history field", () => {
+  const opening = position("ffa", {
+    "8,3": checker("red", "red"),
+    "7,4": checker("blue", "blue"),
+    "0,9": checker("yellow", "yellow"),
+    "3,13": checker("green", "green"),
+  });
+  const played = applyMove(opening, {
+    from: { row: 8, col: 3 },
+    to: { row: 6, col: 5 },
+  });
+  const record = played.history[0];
+  assert.ok(record);
+
+  const variants: GameState[] = [
+    {
+      ...played,
+      continuationFrom: { row: 4, col: 7 },
+    },
+    {
+      ...played,
+      pendingCapturedSquares: [{ row: 7, col: 4 }],
+    },
+  ];
+  for (const color of PLAYER_COLORS) {
+    variants.push({
+      ...played,
+      teamAssignments: {
+        ...played.teamAssignments,
+        [color]:
+          played.teamAssignments[color] === "warm" ? "cool" : "warm",
+      },
+    });
+  }
+  variants.push({
+    ...played,
+    checkersRules: {
+      ...played.checkersRules,
+      preset: "custom",
+    },
+  });
+  for (const rule of [
+    "flyingKings",
+    "backwardCaptures",
+    "mandatoryCapture",
+    "maximumCapture",
+    "continueAfterCrowning",
+  ] as const) {
+    variants.push({
+      ...played,
+      checkersRules: {
+        ...played.checkersRules,
+        [rule]: !played.checkersRules[rule],
+      },
+    });
+  }
+  const recordVariants = [
+    { ...record, id: `${record.id}-changed` },
+    { ...record, revision: record.revision + 1 },
+    { ...record, round: record.round + 1 },
+    { ...record, color: "yellow" as const },
+    { ...record, piece: "crowned" as const },
+    { ...record, from: { ...record.from, row: record.from.row + 1 } },
+    { ...record, from: { ...record.from, col: record.from.col + 1 } },
+    { ...record, to: { ...record.to, row: record.to.row + 1 } },
+    { ...record, to: { ...record.to, col: record.to.col + 1 } },
+    { ...record, captured: "crowned" as const },
+    { ...record, capturedColor: "green" as const },
+    { ...record, eliminated: "green" as const },
+    {
+      ...record,
+      capturedSquare: {
+        row: (record.capturedSquare?.row ?? 0) + 1,
+        col: record.capturedSquare?.col ?? 0,
+      },
+    },
+    {
+      ...record,
+      capturedSquare: {
+        row: record.capturedSquare?.row ?? 0,
+        col: (record.capturedSquare?.col ?? 0) + 1,
+      },
+    },
+    { ...record, promotion: "crowned" as const },
+    { ...record, continued: !record.continued },
+    { ...record, notation: `${record.notation}!` },
+  ];
+  variants.push(
+    ...recordVariants.map((changedRecord) => ({
+      ...played,
+      history: [changedRecord],
+    })),
+  );
+
+  for (const variant of variants) {
+    assert.notEqual(calculateStateHash(variant), played.stateHash);
+    assert.equal(normalizeGameState(variant), null);
+  }
 });
