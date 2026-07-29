@@ -47,5 +47,5 @@
 - [x] Keep free-for-all practice against three computer rivals.
 - [x] Add synchronized turn rewind with coordinator-serialized online requests.
 - [x] Migrate verified v1 recovery copies into the v2 room protocol.
-- [ ] Publish and verify the controls on GitHub Pages.
-- [ ] Remove the follow-up heartbeat after the live deployment is healthy.
+- [x] Publish and verify the controls on GitHub Pages.
+- [x] Remove the follow-up heartbeat after the live deployment is healthy.
