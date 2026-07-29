@@ -75,4 +75,6 @@
 - [x] Restore direct promotion and finished-team-game undo regressions.
 - [x] Clear deferred-capture state on passes and keep crowned checker contrast
   legible across every team palette.
+- [x] Keep International maximum-capture selection exact while memoizing
+  convergent flying-king capture states across roots and bot successors.
 - [x] Pass worker build/tests, GitHub Pages export, TypeScript, and lint.

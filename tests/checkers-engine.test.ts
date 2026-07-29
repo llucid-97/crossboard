@@ -15,8 +15,11 @@ import {
   updateLobby,
 } from "../app/game/engine";
 import {
+  CheckersCaptureSearchDiagnostics,
   checkersRulesForPreset,
+  checkersCapturesForPiece,
   createInitialCheckersBoard,
+  getAllCheckersLegalMoves,
 } from "../app/game/checkers";
 import {
   BoardState,
@@ -578,6 +581,88 @@ test("the maximum-capture option keeps only the longest available chain", () => 
   const moves = getAllLegalMoves(maximumState, "red");
   assert.equal(moves.length, 1);
   assert.equal(squareKey(moves[0].from), "8,3");
+});
+
+test("International maximum-capture search memoizes an adversarial flying-king tree", () => {
+  const enemies = [
+    ["5,10", "blue"],
+    ["11,8", "yellow"],
+    ["7,4", "green"],
+    ["10,11", "blue"],
+    ["7,12", "yellow"],
+    ["3,0", "green"],
+    ["1,4", "blue"],
+    ["1,8", "yellow"],
+    ["4,5", "green"],
+    ["6,9", "blue"],
+    ["12,5", "yellow"],
+    ["4,7", "green"],
+    ["7,8", "blue"],
+    ["8,1", "yellow"],
+    ["5,4", "green"],
+    ["4,1", "blue"],
+    ["4,11", "yellow"],
+    ["8,9", "green"],
+    ["8,7", "blue"],
+    ["10,5", "yellow"],
+    ["6,3", "green"],
+    ["1,6", "blue"],
+    ["8,5", "yellow"],
+    ["6,1", "green"],
+  ] as const;
+  const board: BoardState = {
+    "13,6": {
+      ...checker("red", "red-flying-king", "crowned"),
+      hasMoved: true,
+    },
+  };
+  for (const [key, color] of enemies) {
+    board[key] = {
+      ...checker(
+        color,
+        `${color}-${key}`,
+        color === "green" && key === "3,0" ? "crowned" : "man",
+      ),
+      hasMoved: true,
+    };
+  }
+  const state: GameState = {
+    ...position("ffa", board),
+    checkersRules: checkersRulesForPreset("international"),
+  };
+
+  assert.equal(
+    checkersCapturesForPiece(state, { row: 13, col: 6 }).length,
+    6,
+  );
+  const first: CheckersCaptureSearchDiagnostics = {
+    expandedStates: 0,
+    cacheHits: 0,
+    topLevelCacheHits: 0,
+  };
+  const moves = getAllCheckersLegalMoves(state, "red", first);
+  assert.equal(moves.length, 6);
+  assert.deepEqual(first, {
+    expandedStates: 50_109,
+    cacheHits: 20_917,
+    topLevelCacheHits: 0,
+  });
+
+  const second: CheckersCaptureSearchDiagnostics = {
+    expandedStates: 0,
+    cacheHits: 0,
+    topLevelCacheHits: 0,
+  };
+  assert.deepEqual(
+    getAllCheckersLegalMoves(state, "red", second),
+    moves,
+  );
+  assert.deepEqual(second, {
+    expandedStates: 0,
+    cacheHits: 0,
+    topLevelCacheHits: 1,
+  });
+  assert.ok(chooseComputerMove(state, "red"));
 });
 
 test("a color with no legal move is eliminated when its turn passes", () => {
