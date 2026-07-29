@@ -1,0 +1,234 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { chooseComputerMove } from "../app/game/ai";
+import {
+  applyMove,
+  calculateStateHash,
+  createGameState,
+  createInitialBoard,
+  getAllLegalMoves,
+  getLegalMovesForPiece,
+  isPlayableSquare,
+  squareKey,
+  startGame,
+  updateLobby,
+} from "../app/game/engine";
+import {
+  electCoordinator,
+  shouldAdoptSnapshot,
+} from "../app/game/network";
+import {
+  BoardState,
+  GameMode,
+  GameState,
+  Piece,
+  PlayerColor,
+  PLAYER_COLORS,
+} from "../app/game/types";
+
+function piece(
+  color: PlayerColor,
+  type: Piece["type"],
+  id: string,
+): Piece {
+  return { id, color, type, hasMoved: false };
+}
+
+function position(
+  mode: GameMode,
+  board: BoardState,
+  turn: PlayerColor = "red",
+): GameState {
+  const initial = createGameState("TEST-ROOM-01", mode);
+  const seats = { ...initial.seats };
+  PLAYER_COLORS.forEach((color) => {
+    seats[color] = {
+      color,
+      controller: color === "red" ? "human" : "computer",
+      name: color,
+    };
+  });
+  const state: GameState = {
+    ...initial,
+    seats,
+    mode,
+    phase: "playing",
+    board,
+    turn,
+    revision: 4,
+    lastActionId: "fixture",
+    stateHash: "",
+  };
+  return { ...state, stateHash: calculateStateHash(state) };
+}
+
+test("the 14 by 14 cross contains 160 playable squares", () => {
+  let playable = 0;
+  for (let row = 0; row < 14; row += 1) {
+    for (let col = 0; col < 14; col += 1) {
+      playable += isPlayableSquare(row, col) ? 1 : 0;
+    }
+  }
+  assert.equal(playable, 160);
+  assert.equal(isPlayableSquare(0, 0), false);
+  assert.equal(isPlayableSquare(0, 3), true);
+  assert.equal(isPlayableSquare(13, 10), true);
+});
+
+test("initial setup gives every color sixteen pieces", () => {
+  const board = createInitialBoard();
+  assert.equal(Object.keys(board).length, 64);
+  for (const color of PLAYER_COLORS) {
+    assert.equal(
+      Object.values(board).filter((candidate) => candidate.color === color).length,
+      16,
+    );
+  }
+});
+
+test("pawns move one or two squares and promote on the rank-eleven line", () => {
+  const opening = startGame(
+    updateLobby(createGameState("TEST-ROOM-02", "ffa"), {
+      seats: {
+        red: { color: "red", controller: "human", name: "Red" },
+        blue: { color: "blue", controller: "computer", name: "Blue" },
+        yellow: { color: "yellow", controller: "computer", name: "Yellow" },
+        green: { color: "green", controller: "computer", name: "Green" },
+      },
+    }, "ready"),
+  );
+  const pawnMoves = getLegalMovesForPiece(opening, { row: 12, col: 6 });
+  assert.deepEqual(
+    pawnMoves.map((move) => move.to.row).sort(),
+    [10, 11],
+  );
+
+  const promotion = position("ffa", {
+    "4,6": piece("red", "pawn", "red-pawn"),
+    "8,6": piece("red", "king", "red-king"),
+    "4,8": piece("blue", "king", "blue-king"),
+    "2,7": piece("yellow", "king", "yellow-king"),
+    "7,11": piece("green", "king", "green-king"),
+  });
+  const promoted = applyMove(promotion, {
+    from: { row: 4, col: 6 },
+    to: { row: 3, col: 6 },
+  });
+  assert.equal(promoted.board["3,6"].type, "queen");
+});
+
+test("capturing a king eliminates a color in free-for-all", () => {
+  const state = position("ffa", {
+    "6,5": piece("red", "rook", "red-rook"),
+    "8,6": piece("red", "king", "red-king"),
+    "6,7": piece("blue", "king", "blue-king"),
+    "7,7": piece("blue", "pawn", "blue-pawn"),
+    "2,7": piece("yellow", "king", "yellow-king"),
+    "7,11": piece("green", "king", "green-king"),
+  });
+  const next = applyMove(state, {
+    from: { row: 6, col: 5 },
+    to: { row: 6, col: 7 },
+  });
+  assert.deepEqual(next.eliminated, ["blue"]);
+  assert.equal(
+    Object.values(next.board).some((candidate) => candidate.color === "blue"),
+    false,
+  );
+  assert.equal(next.turn, "yellow");
+  assert.equal(next.phase, "playing");
+});
+
+test("capturing either enemy king immediately wins a team game", () => {
+  const state = position("teams", {
+    "6,5": piece("red", "rook", "red-rook"),
+    "8,6": piece("red", "king", "red-king"),
+    "6,7": piece("blue", "king", "blue-king"),
+    "2,7": piece("yellow", "king", "yellow-king"),
+    "7,11": piece("green", "king", "green-king"),
+  });
+  const next = applyMove(state, {
+    from: { row: 6, col: 5 },
+    to: { row: 6, col: 7 },
+  });
+  assert.equal(next.phase, "finished");
+  assert.deepEqual(next.winners, ["red", "yellow"]);
+});
+
+test("the casual four-ply bot is deterministic and returns a legal move", () => {
+  const initial = createGameState("TEST-ROOM-03", "ffa");
+  const seats = { ...initial.seats };
+  PLAYER_COLORS.forEach((color) => {
+    seats[color] = {
+      color,
+      controller: "computer",
+      name: color,
+    };
+  });
+  const game = startGame(updateLobby(initial, { seats }, "ready"));
+  const first = chooseComputerMove(game, "red");
+  const second = chooseComputerMove(game, "red");
+  assert.deepEqual(first, second);
+  assert.ok(first);
+  assert.ok(
+    getAllLegalMoves(game, "red").some(
+      (move) =>
+        squareKey(move.from) === squareKey(first.from) &&
+        squareKey(move.to) === squareKey(first.to),
+    ),
+  );
+});
+
+test("host election moves to the lowest connected human seat", () => {
+  const state = createGameState("TEST-ROOM-04", "teams");
+  state.seats.yellow = {
+    color: "yellow",
+    controller: "human",
+    name: "Yellow",
+  };
+  state.seats.green = {
+    color: "green",
+    controller: "human",
+    name: "Green",
+  };
+  assert.equal(electCoordinator(state, "yellow", ["green"]), "yellow");
+  assert.equal(electCoordinator(state, "green", []), "green");
+});
+
+test("every accepted action advances a deterministic hash chain", () => {
+  const initial = createGameState("TEST-ROOM-05", "teams");
+  const changed = updateLobby(initial, { mode: "ffa" }, "mode-ffa");
+  assert.equal(changed.parentHash, initial.stateHash);
+  assert.notEqual(changed.stateHash, initial.stateHash);
+  assert.equal(calculateStateHash(changed), changed.stateHash);
+});
+
+test("partitioned copies choose the same first child after their common ancestor", () => {
+  const base = createGameState("TEST-ROOM-06", "teams");
+  const ffaBranch = updateLobby(base, { mode: "ffa" }, "branch-ffa");
+  const seats = {
+    ...base.seats,
+    green: {
+      color: "green" as const,
+      controller: "open" as const,
+      name: "Open seat",
+    },
+  };
+  const seatBranch = updateLobby(base, { seats }, "branch-seat");
+  const expectedWinner =
+    ffaBranch.stateHash.localeCompare(seatBranch.stateHash) < 0
+      ? ffaBranch
+      : seatBranch;
+  const expectedLoser =
+    expectedWinner === ffaBranch ? seatBranch : ffaBranch;
+
+  assert.equal(shouldAdoptSnapshot(expectedLoser, expectedWinner), true);
+  assert.equal(shouldAdoptSnapshot(expectedWinner, expectedLoser), false);
+
+  const extendedWinner = updateLobby(
+    expectedWinner,
+    { mode: expectedWinner.mode },
+    "winner-extension",
+  );
+  assert.equal(shouldAdoptSnapshot(expectedLoser, extendedWinner), true);
+});
