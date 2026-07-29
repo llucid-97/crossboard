@@ -1,10 +1,37 @@
 export const PLAYER_COLORS = ["red", "blue", "yellow", "green"] as const;
 
 export type PlayerColor = (typeof PLAYER_COLORS)[number];
+export type GameKind = "chess" | "checkers";
 export type GameMode = "ffa" | "teams";
+export type TeamId = "warm" | "cool";
+export type TeamAssignments = Record<PlayerColor, TeamId>;
 export type GamePhase = "lobby" | "playing" | "finished";
 export type SeatController = "human" | "open" | "computer";
-export type PieceType = "pawn" | "knight" | "bishop" | "rook" | "queen" | "king";
+export type ChessPieceType =
+  | "pawn"
+  | "knight"
+  | "bishop"
+  | "rook"
+  | "queen"
+  | "king";
+export type CheckersPieceType = "man" | "crowned";
+export type PieceType = ChessPieceType | CheckersPieceType;
+export type CheckersPreset =
+  | "american"
+  | "international"
+  | "house"
+  | "custom";
+
+export interface CheckersRules {
+  preset: CheckersPreset;
+  flyingKings: boolean;
+  backwardCaptures: boolean;
+  mandatoryCapture: boolean;
+  maximumCapture: boolean;
+  continueAfterCrowning: boolean;
+  deferredCaptureRemoval: boolean;
+  deferredPromotion: boolean;
+}
 
 export interface Coord {
   row: number;
@@ -21,7 +48,8 @@ export interface Piece {
 export interface Move {
   from: Coord;
   to: Coord;
-  promotion?: "queen";
+  capturedSquare?: Coord;
+  promotion?: "queen" | "crowned";
 }
 
 export interface MoveRecord extends Move {
@@ -33,6 +61,8 @@ export interface MoveRecord extends Move {
   captured?: PieceType;
   capturedColor?: PlayerColor;
   eliminated?: PlayerColor;
+  eliminatedColors?: PlayerColor[];
+  continued?: boolean;
   notation: string;
 }
 
@@ -55,13 +85,25 @@ export interface UndoFrame {
   historyLength: number;
   eliminated: PlayerColor[];
   winners: PlayerColor[] | null;
+  continuationFrom: Coord | null;
+  pendingCapturedSquares: Coord[];
 }
 
+export const DEFAULT_TEAM_ASSIGNMENTS: TeamAssignments = {
+  red: "warm",
+  blue: "cool",
+  yellow: "warm",
+  green: "cool",
+};
+
 export interface GameState {
-  schemaVersion: 2;
-  ruleset: "crossboard-capture-v1";
+  schemaVersion: 3;
+  ruleset: "crossboard-capture-v1" | "crossboard-checkers-v1";
+  gameKind: GameKind;
   roomCode: string;
   mode: GameMode;
+  teamAssignments: TeamAssignments;
+  checkersRules: CheckersRules;
   phase: GamePhase;
   board: BoardState;
   seats: SeatMap;
@@ -69,9 +111,11 @@ export interface GameState {
   revision: number;
   round: number;
   history: MoveRecord[];
-  undoStack?: UndoFrame[];
   eliminated: PlayerColor[];
   winners: PlayerColor[] | null;
+  continuationFrom: Coord | null;
+  pendingCapturedSquares: Coord[];
+  undoStack?: UndoFrame[];
   lastActionId: string;
   parentHash: string;
   stateHash: string;
@@ -96,6 +140,18 @@ export const COLOR_SYMBOLS: Record<PlayerColor, string> = {
   green: "■",
 };
 
+export const POSITION_LABELS: Record<PlayerColor, string> = {
+  red: "South",
+  blue: "West",
+  yellow: "North",
+  green: "East",
+};
+
+export const TEAM_LABELS: Record<TeamId, string> = {
+  warm: "Warm",
+  cool: "Cool",
+};
+
 export const PIECE_LABELS: Record<PieceType, string> = {
   pawn: "Pawn",
   knight: "Knight",
@@ -103,6 +159,8 @@ export const PIECE_LABELS: Record<PieceType, string> = {
   rook: "Rook",
   queen: "Queen",
   king: "King",
+  man: "Checker",
+  crowned: "King",
 };
 
 export const PIECE_GLYPHS: Record<PieceType, string> = {
@@ -112,4 +170,6 @@ export const PIECE_GLYPHS: Record<PieceType, string> = {
   rook: "♜",
   queen: "♛",
   king: "♚",
+  man: "●",
+  crowned: "♛",
 };

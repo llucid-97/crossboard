@@ -5,9 +5,9 @@ const siteUrl = (
   process.env.NEXT_PUBLIC_SITE_URL ??
   "https://llucid-97.github.io/crossboard"
 ).replace(/\/+$/, "");
-const title = "Crossboard — four-player chess, peer to peer";
+const title = "Crossboard — four-player chess and checkers";
 const description =
-  "Play four-player chess in teams or free-for-all rooms with casual computer opponents and automatic coordinator handoff.";
+  "Play four-player chess or checkers in teams and free-for-all rooms with casual computer opponents, customizable rules, and automatic coordinator handoff.";
 const socialImage = `${siteUrl}/og.png`;
 
 export const metadata: Metadata = {

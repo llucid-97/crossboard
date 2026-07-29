@@ -4,7 +4,7 @@
 
 - [x] Brand the project **Crossboard**.
 - [x] Build a 14×14 cross-shaped four-player board.
-- [x] Support Free-for-all and opposite-seat Teams.
+- [x] Support Free-for-all and configurable Warm/Cool Teams.
 - [x] Let seats be local human, open for an online player, or computer-controlled.
 - [x] Target a casual-but-thoughtful bot rather than expert strength.
 - [x] Use deterministic replicated state so any connected human can become coordinator.
@@ -49,3 +49,32 @@
 - [x] Migrate verified v1 recovery copies into the v2 room protocol.
 - [x] Publish and verify the controls on GitHub Pages.
 - [x] Remove the follow-up heartbeat after the live deployment is healthy.
+
+## Checkers integration
+
+- [x] Merge current `main` without regressing direct chess practice or shared
+  online undo.
+- [x] Move saves and peer IDs to schema/protocol v3, with verified v1/v2 chess
+  recovery migration.
+- [x] Make a checkers undo checkpoint cover the whole human capture chain and
+  following computer replies.
+- [x] Keep automatic no-move elimination out of the undo stack.
+- [x] Recheck both state hash and coordinator ownership inside delayed turns.
+- [x] Serialize all lobby edits and Start from the latest state ref.
+- [x] Implement FMJD-style deferred capture removal and promotion for the
+  International preset.
+- [x] Teach minimax to search through no-move elimination.
+- [x] Add migration, undo, timer, lobby-race, International-rules, tactical-AI,
+  and full hash-contract regressions.
+- [x] Preserve International capture and promotion timing when visible options
+  turn the preset into Custom.
+- [x] Record every color eliminated by a deferred multi-capture chain.
+- [x] Keep the local recommended checkers setup startable and hide controls
+  that would create unfillable open seats without a mesh.
+- [x] Reject self-hashed schema-v3 snapshots with partial or invalid team maps.
+- [x] Restore direct promotion and finished-team-game undo regressions.
+- [x] Clear deferred-capture state on passes and keep crowned checker contrast
+  legible across every team palette.
+- [x] Keep International maximum-capture selection exact while memoizing
+  convergent flying-king capture states across roots and bot successors.
+- [x] Pass worker build/tests, GitHub Pages export, TypeScript, and lint.

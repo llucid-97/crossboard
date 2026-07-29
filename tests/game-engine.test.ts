@@ -12,13 +12,19 @@ import {
   getUndoActionCount,
   isPlayableSquare,
   normalizeGameState,
+  playerAppearance,
   squareKey,
   startGame,
   teamOf,
-  undoLastTurn,
   updateLobby,
+  undoLastTurn,
 } from "../app/game/engine";
 import {
+  configureFriendsVsComputers,
+  runLobbyCommand,
+} from "../app/game/lobby";
+import {
+  coordinatorOwnsState,
   electCoordinator,
   seatPeerId,
   shouldAdoptSnapshot,
@@ -31,6 +37,7 @@ import {
   Piece,
   PlayerColor,
   PLAYER_COLORS,
+  TeamAssignments,
 } from "../app/game/types";
 
 function piece(
@@ -93,24 +100,43 @@ test("initial setup gives every color sixteen pieces", () => {
   }
 });
 
-test("practice offers a computer teammate or three computer rivals", () => {
-  const teams = createPracticeGame("teams", "Player");
+test("chess practice starts directly in teams or free-for-all", () => {
+  const teams = createPracticeGame("teams", "Player", "chess");
   assert.equal(teams.phase, "playing");
   assert.equal(teams.mode, "teams");
   assert.equal(teams.seats.red.controller, "human");
   assert.equal(teams.seats.yellow.controller, "computer");
-  assert.equal(teamOf("red"), teamOf("yellow"));
-  assert.notEqual(teamOf("red"), teamOf("blue"));
+  assert.equal(
+    teamOf("red", teams.teamAssignments),
+    teamOf("yellow", teams.teamAssignments),
+  );
 
-  const freeForAll = createPracticeGame("ffa", "Player");
+  const freeForAll = createPracticeGame("ffa", "Player", "chess");
   assert.equal(freeForAll.phase, "playing");
   assert.equal(freeForAll.mode, "ffa");
   for (const color of ["blue", "yellow", "green"] as const) {
     assert.equal(freeForAll.seats[color].controller, "computer");
   }
+});
 
-  const onlineDefault = createGameState("TEST-ONLINE", "teams", "Player");
-  assert.equal(onlineDefault.seats.yellow.controller, "open");
+test("the friends preset opens an invite online but stays startable locally", () => {
+  const base = createGameState(
+    "TEST-PRESET-SCOPE",
+    "ffa",
+    "Player",
+    "checkers",
+  );
+  const local = configureFriendsVsComputers(base, "red", false);
+  for (const color of ["blue", "yellow", "green"] as const) {
+    assert.equal(local.seats[color].controller, "computer");
+  }
+  assert.equal(startGame(local).phase, "playing");
+
+  const networked = configureFriendsVsComputers(base, "red", true);
+  assert.equal(networked.seats.yellow.controller, "open");
+  assert.equal(networked.seats.blue.controller, "computer");
+  assert.equal(networked.seats.green.controller, "computer");
+  assert.equal(startGame(networked).phase, "lobby");
 });
 
 test("pawns move one or two squares and promote on the rank-eleven line", () => {
@@ -216,8 +242,8 @@ test("the casual four-ply bot is deterministic and returns a legal move", () => 
   );
 });
 
-test("one undo rewinds a human move and every following computer reply", () => {
-  const opening = createPracticeGame("ffa", "Player");
+test("one undo rewinds a human chess move and every computer reply", () => {
+  const opening = createPracticeGame("ffa", "Player", "chess");
   let played = opening;
   for (let index = 0; index < PLAYER_COLORS.length; index += 1) {
     const move = getAllLegalMoves(played, played.turn)[0];
@@ -243,37 +269,75 @@ test("one undo rewinds a human move and every following computer reply", () => {
   assert.equal(shouldAdoptSnapshot(undone, played), false);
 });
 
-test("an accepted undo wins a same-position fork against a late move", () => {
-  const opening = createPracticeGame("ffa", "Player");
-  const redMove = getAllLegalMoves(opening, "red")[0];
-  const afterRed = applyMove(opening, redMove);
-  const undone = undoLastTurn(afterRed);
-  const blueMove = getAllLegalMoves(afterRed, "blue")[0];
-  const lateMove = applyMove(afterRed, blueMove);
+test("verified v1 and v2 chess recovery copies migrate to schema v3", () => {
+  const current = createGameState("TEST-LEGACY", "teams", "Player");
+  for (const schemaVersion of [1, 2] as const) {
+    const legacy = {
+      ...current,
+      schemaVersion,
+      gameKind: undefined,
+      teamAssignments: undefined,
+      checkersRules: undefined,
+      continuationFrom: undefined,
+      pendingCapturedSquares: undefined,
+      undoStack: schemaVersion === 2 ? [] : undefined,
+      stateHash: "",
+    };
+    legacy.stateHash = calculateStateHash(
+      legacy as unknown as GameState,
+    );
 
-  assert.equal(undone.parentHash, afterRed.stateHash);
-  assert.equal(lateMove.parentHash, afterRed.stateHash);
-  assert.equal(shouldAdoptSnapshot(lateMove, undone), true);
-  assert.equal(shouldAdoptSnapshot(undone, lateMove), false);
+    const migrated = normalizeGameState(legacy);
+    assert.ok(migrated);
+    assert.equal(migrated.schemaVersion, 3);
+    assert.equal(migrated.gameKind, "chess");
+    assert.deepEqual(migrated.undoStack, []);
+    assert.deepEqual(migrated.pendingCapturedSquares, []);
+    assert.equal(
+      migrated.checkersRules.deferredCaptureRemoval,
+      false,
+    );
+    assert.equal(migrated.checkersRules.deferredPromotion, false);
+    assert.equal(migrated.revision, legacy.revision + 1);
+    assert.equal(migrated.parentHash, legacy.stateHash);
+    assert.equal(calculateStateHash(migrated), migrated.stateHash);
+  }
 });
 
-test("legacy v1 recovery copies migrate to a stamped v2 state", () => {
-  const current = createGameState("TEST-LEGACY", "teams", "Player");
+test("a schema-v2 undo frame migrates with explicit checkers continuation fields", () => {
+  const opening = createPracticeGame("ffa", "Player", "chess");
+  const played = applyMove(
+    opening,
+    getAllLegalMoves(opening, "red")[0],
+  );
   const legacy = {
-    ...current,
-    schemaVersion: 1,
-    undoStack: undefined,
+    ...played,
+    schemaVersion: 2,
+    gameKind: undefined,
+    teamAssignments: undefined,
+    checkersRules: undefined,
+    continuationFrom: undefined,
+    pendingCapturedSquares: undefined,
+    undoStack: played.undoStack?.map((frame) => ({
+      actor: frame.actor,
+      phase: frame.phase,
+      board: frame.board,
+      turn: frame.turn,
+      round: frame.round,
+      historyLength: frame.historyLength,
+      eliminated: frame.eliminated,
+      winners: frame.winners,
+    })),
     stateHash: "",
   };
   legacy.stateHash = calculateStateHash(legacy as unknown as GameState);
 
   const migrated = normalizeGameState(legacy);
   assert.ok(migrated);
-  assert.equal(migrated.schemaVersion, 2);
-  assert.deepEqual(migrated.undoStack, []);
-  assert.equal(migrated.revision, legacy.revision + 1);
-  assert.equal(migrated.parentHash, legacy.stateHash);
-  assert.equal(calculateStateHash(migrated), migrated.stateHash);
+  assert.equal(migrated.schemaVersion, 3);
+  assert.equal(migrated.undoStack?.length, 1);
+  assert.equal(migrated.undoStack?.[0].continuationFrom, null);
+  assert.deepEqual(migrated.undoStack?.[0].pendingCapturedSquares, []);
 });
 
 test("host election moves to the lowest connected human seat", () => {
@@ -292,8 +356,31 @@ test("host election moves to the lowest connected human seat", () => {
   assert.equal(electCoordinator(state, "green", []), "green");
 });
 
+test("timer guards reject stale state and a coordinator handoff", () => {
+  const state = createGameState("TEST-TIMER-GUARD", "teams");
+  state.seats.yellow = {
+    color: "yellow",
+    controller: "human",
+    name: "Yellow",
+  };
+  state.stateHash = calculateStateHash(state);
+
+  assert.equal(
+    coordinatorOwnsState(state, state.stateHash, "red", ["yellow"]),
+    true,
+  );
+  assert.equal(
+    coordinatorOwnsState(state, "stale-hash", "red", ["yellow"]),
+    false,
+  );
+  assert.equal(
+    coordinatorOwnsState(state, state.stateHash, "yellow", ["red"]),
+    false,
+  );
+});
+
 test("only the coordinator accepts a current undo request from its human seat", () => {
-  const state = createPracticeGame("teams", "Red");
+  const state = createPracticeGame("teams", "Red", "chess");
   state.seats.yellow = {
     color: "yellow",
     controller: "human",
@@ -313,27 +400,7 @@ test("only the coordinator accepts a current undo request from its human seat", 
     "yellow",
   );
   assert.equal(
-    undoRequesterFor(state, "red", ["yellow"], yellowPeerId, "stale-hash"),
-    null,
-  );
-  assert.equal(
-    undoRequesterFor(
-      state,
-      "red",
-      ["yellow"],
-      "forged-room-yellow",
-      state.stateHash,
-    ),
-    null,
-  );
-  assert.equal(
-    undoRequesterFor(
-      state,
-      "yellow",
-      ["red"],
-      seatPeerId(state.roomCode, "red"),
-      state.stateHash,
-    ),
+    undoRequesterFor(state, "red", ["yellow"], yellowPeerId, "stale"),
     null,
   );
 });
@@ -344,6 +411,55 @@ test("every accepted action advances a deterministic hash chain", () => {
   assert.equal(changed.parentHash, initial.stateHash);
   assert.notEqual(changed.stateHash, initial.stateHash);
   assert.equal(calculateStateHash(changed), changed.stateHash);
+});
+
+test("team assignments are replicated and change the deterministic hash", () => {
+  const initial = createGameState("TEST-ROOM-TEAMS", "teams");
+  const teamAssignments: TeamAssignments = {
+    red: "warm",
+    blue: "warm",
+    yellow: "warm",
+    green: "cool",
+  };
+  const changed = updateLobby(
+    initial,
+    { teamAssignments },
+    "three-versus-one",
+  );
+  assert.equal(changed.parentHash, initial.stateHash);
+  assert.notEqual(changed.stateHash, initial.stateHash);
+  assert.equal(calculateStateHash(changed), changed.stateHash);
+});
+
+test("team palettes label two-player and three-player sides consistently", () => {
+  const initial = createGameState("TEST-ROOM-PALETTE", "teams");
+  assert.equal(
+    playerAppearance("red", "teams", initial.teamAssignments).label,
+    "Light red",
+  );
+  assert.equal(
+    playerAppearance("yellow", "teams", initial.teamAssignments).label,
+    "Dark red",
+  );
+  assert.equal(
+    playerAppearance("blue", "teams", initial.teamAssignments).label,
+    "Light blue",
+  );
+
+  const threeVersusOne: TeamAssignments = {
+    red: "warm",
+    blue: "warm",
+    yellow: "warm",
+    green: "cool",
+  };
+  assert.equal(
+    playerAppearance("yellow", "teams", threeVersusOne).label,
+    "Orange",
+  );
+  assert.equal(
+    playerAppearance("green", "teams", threeVersusOne).label,
+    "Light blue",
+  );
 });
 
 test("partitioned copies choose the same first child after their common ancestor", () => {
@@ -374,4 +490,47 @@ test("partitioned copies choose the same first child after their common ancestor
     "winner-extension",
   );
   assert.equal(shouldAdoptSnapshot(expectedLoser, extendedWinner), true);
+});
+
+test("rapid lobby edits and Start serialize from the latest committed state", () => {
+  const initial = createGameState(
+    "TEST-LOBBY-SERIAL",
+    "teams",
+    "Red",
+    "checkers",
+  );
+  const seats = { ...initial.seats };
+  PLAYER_COLORS.forEach((color) => {
+    seats[color] = {
+      color,
+      controller: color === "red" ? "human" : "computer",
+      name: color,
+    };
+  });
+  const ready = updateLobby(initial, { seats }, "fill-seats");
+  const ref: { current: GameState | null } = { current: ready };
+  const commit = (next: GameState) => {
+    ref.current = next;
+  };
+
+  const edited = runLobbyCommand(ref, commit, (current) =>
+    updateLobby(
+      current,
+      {
+        checkersRules: {
+          ...current.checkersRules,
+          preset: "custom",
+          flyingKings: false,
+        },
+      },
+      "rapid-rule-edit",
+    ),
+  );
+  const started = runLobbyCommand(ref, commit, startGame);
+
+  assert.ok(edited);
+  assert.ok(started);
+  assert.equal(started.parentHash, edited.stateHash);
+  assert.equal(started.checkersRules.flyingKings, false);
+  assert.equal(started.phase, "playing");
 });

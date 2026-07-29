@@ -31,24 +31,35 @@ test("server-renders the Crossboard product shell", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>Crossboard — four-player chess, peer to peer<\/title>/i);
-  assert.match(html, /Four sides\./i);
-  assert.match(html, /Create a room/i);
+  assert.match(
+    html,
+    /<title>Crossboard — four-player chess and checkers<\/title>/i,
+  );
+  assert.match(html, /Pick your/i);
+  assert.match(html, /Four-player checkers/i);
   assert.match(html, /Practice teams/i);
   assert.match(html, /Practice free-for-all/i);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
 });
 
 test("removes the disposable starter and records production metadata", async () => {
-  const [page, layout, packageJson] = await Promise.all([
+  const [page, layout, packageJson, appSource] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(
+      new URL("../app/components/CrossboardApp.tsx", import.meta.url),
+      "utf8",
+    ),
   ]);
 
   assert.match(page, /CrossboardApp/);
-  assert.match(layout, /Crossboard — four-player chess, peer to peer/);
+  assert.match(layout, /Crossboard — four-player chess and checkers/);
   assert.match(packageJson, /"peerjs"/);
+  assert.match(appSource, /Undo turn/);
+  assert.match(appSource, /runLobbyCommand\(gameRef/);
+  assert.match(appSource, /allowOpenSeats=\{isNetworked\}/);
+  assert.match(appSource, /You \+ a computer vs two computers/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("app/_sites-preview", projectRoot)));
 });

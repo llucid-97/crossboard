@@ -15,10 +15,13 @@ import {
   createGameState,
   createPracticeGame,
   describeWinner,
+  gameKindOf,
+  getAllLegalMoves,
   getLegalMovesForPiece,
   getUndoActionCount,
   normalizeGameState,
   passTurn,
+  playerAppearance,
   sameSquare,
   squareKey,
   squareName,
@@ -27,8 +30,10 @@ import {
   undoLastTurn,
   updateLobby,
 } from "../game/engine";
+import { checkersRulesForPreset } from "../game/checkers";
 import {
   discoverRoom,
+  coordinatorOwnsState,
   electCoordinator,
   PeerMesh,
   seatPeerId,
@@ -38,15 +43,25 @@ import {
   WireMessage,
 } from "../game/network";
 import {
+  configureFriendsVsComputers,
+  runLobbyCommand,
+} from "../game/lobby";
+import {
   COLOR_LABELS,
   COLOR_SYMBOLS,
+  CheckersPreset,
+  CheckersRules,
   Coord,
+  GameKind,
   GameMode,
   GameState,
   PIECE_LABELS,
   PlayerColor,
   PLAYER_COLORS,
+  POSITION_LABELS,
   SeatController,
+  TeamId,
+  TEAM_LABELS,
 } from "../game/types";
 import { GameBoard } from "./GameBoard";
 
@@ -81,6 +96,19 @@ function humanSeatIsPresent(
   connectedColors: PlayerColor[],
 ): boolean {
   return color === localColor || connectedColors.includes(color);
+}
+
+function displaySeatName(game: GameState, color: PlayerColor): string {
+  const seat = game.seats[color];
+  if (seat.controller !== "computer") {
+    return seat.name;
+  }
+  const appearance = playerAppearance(
+    color,
+    game.mode,
+    game.teamAssignments,
+  );
+  return `Computer ${appearance.label}`;
 }
 
 interface StoredMatch {
@@ -120,7 +148,9 @@ interface SeatCardProps {
   connectedColors: PlayerColor[];
   active: boolean;
   canManage: boolean;
+  allowOpenSeats: boolean;
   onChangeController: (color: PlayerColor, controller: SeatController) => void;
+  onChangeTeam: (color: PlayerColor, team: TeamId) => void;
 }
 
 function SeatCard({
@@ -130,31 +160,42 @@ function SeatCard({
   connectedColors,
   active,
   canManage,
+  allowOpenSeats,
   onChangeController,
+  onChangeTeam,
 }: SeatCardProps) {
   const seat = game.seats[color];
+  const appearance = playerAppearance(
+    color,
+    game.mode,
+    game.teamAssignments,
+  );
   const isLocal = color === localColor && seat.controller === "human";
   const connected =
     seat.controller !== "human" ||
     humanSeatIsPresent(color, localColor, connectedColors);
   const team =
-    game.mode === "teams" ? ` · Team ${teamOf(color)}` : "";
+    appearance.team === null ? null : TEAM_LABELS[appearance.team];
+  const seatName = displaySeatName(game, color);
 
   return (
     <article
       className={`seat-card seat-${color}${active ? " is-active" : ""}`}
-      aria-label={`${COLOR_LABELS[color]} seat`}
+      aria-label={`${POSITION_LABELS[color]} seat`}
     >
       <div className="seat-heading">
-        <span className={`color-token token-${color}`} aria-hidden="true">
+        <span
+          className={`color-token token-${color} ${appearance.paletteClass}`}
+          aria-hidden="true"
+        >
           {COLOR_SYMBOLS[color]}
         </span>
         <div>
           <strong>
-            {COLOR_LABELS[color]}
-            {team}
+            {POSITION_LABELS[color]} · {appearance.label}
           </strong>
           <span>
+            {team ? `${team} team · ` : ""}
             {seat.controller === "computer"
               ? "Computer · Casual"
               : seat.controller === "open"
@@ -167,8 +208,38 @@ function SeatCard({
           </span>
         </div>
       </div>
-      <div className="seat-name">{seat.name}</div>
-      {canManage && color !== localColor && seat.controller !== "human" ? (
+      <div className="seat-name">{seatName}</div>
+      {game.mode === "teams" ? (
+        <div
+          className="team-picker"
+          role="group"
+          aria-label={`${POSITION_LABELS[color]} team`}
+        >
+          {(["warm", "cool"] as const).map((candidate) => (
+            <button
+              type="button"
+              className={
+                teamOf(color, game.teamAssignments) === candidate
+                  ? `active team-${candidate}`
+                  : `team-${candidate}`
+              }
+              aria-pressed={
+                teamOf(color, game.teamAssignments) === candidate
+              }
+              disabled={!canManage}
+              onClick={() => onChangeTeam(color, candidate)}
+              key={candidate}
+            >
+              <span aria-hidden="true" />
+              {TEAM_LABELS[candidate]}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {canManage &&
+      color !== localColor &&
+      seat.controller !== "human" &&
+      (allowOpenSeats || seat.controller === "open") ? (
         <button
           className="text-button"
           type="button"
@@ -188,6 +259,7 @@ function SeatCard({
 
 export function CrossboardApp() {
   const [view, setView] = useState<View>("home");
+  const [selectedGame, setSelectedGame] = useState<GameKind>("chess");
   const [game, setGame] = useState<GameState | null>(null);
   const [localColor, setLocalColor] = useState<PlayerColor>("red");
   const [connectedColors, setConnectedColors] = useState<PlayerColor[]>([]);
@@ -271,6 +343,7 @@ export function CrossboardApp() {
       const current = gameRef.current;
       if (!current) {
         installState(normalized);
+        setSelectedGame(gameKindOf(normalized));
         return;
       }
       if (normalized.stateHash === current.stateHash) {
@@ -285,6 +358,7 @@ export function CrossboardApp() {
           setNotice("The room compared two copies and restored one shared position.");
         }
         installState(normalized);
+        setSelectedGame(gameKindOf(normalized));
         setSelected(null);
         if (normalized.phase !== "lobby") {
           setView("game");
@@ -410,6 +484,42 @@ export function CrossboardApp() {
     game.seats[game.turn].controller === "computer";
 
   useEffect(() => {
+    if (
+      !game ||
+      gameKindOf(game) !== "checkers" ||
+      game.phase !== "playing" ||
+      coordinator !== localColor ||
+      getAllLegalMoves(game, game.turn).length
+    ) {
+      return;
+    }
+    const expectedStateHash = game.stateHash;
+    const timer = window.setTimeout(() => {
+      const current = gameRef.current;
+      if (
+        !current ||
+        !coordinatorOwnsState(
+          current,
+          expectedStateHash,
+          localColorRef.current,
+          connectedRef.current,
+        ) ||
+        gameKindOf(current) !== "checkers" ||
+        current.phase !== "playing" ||
+        getAllLegalMoves(current, current.turn).length
+      ) {
+        return;
+      }
+      const eliminatedColor = current.turn;
+      commitState(passTurn(current, eliminatedColor));
+      setNotice(
+        `${COLOR_LABELS[eliminatedColor]} has no legal move and is out.`,
+      );
+    }, 420);
+    return () => window.clearTimeout(timer);
+  }, [commitState, coordinator, game, localColor]);
+
+  useEffect(() => {
     if (!game || game.phase !== "playing") {
       return;
     }
@@ -423,14 +533,14 @@ export function CrossboardApp() {
       const current = gameRef.current;
       if (
         !current ||
-        current.stateHash !== expectedStateHash ||
-        current.phase !== "playing" ||
-        current.seats[current.turn].controller !== "computer" ||
-        electCoordinator(
+        !coordinatorOwnsState(
           current,
+          expectedStateHash,
           localColorRef.current,
           connectedRef.current,
-        ) !== localColorRef.current
+        ) ||
+        current.phase !== "playing" ||
+        current.seats[current.turn].controller !== "computer"
       ) {
         return;
       }
@@ -450,13 +560,14 @@ export function CrossboardApp() {
     window.history.replaceState({}, "", url);
   };
 
-  const createOnlineRoom = async () => {
+  const createOnlineRoom = async (kind: GameKind = selectedGame) => {
     localStorage.setItem("crossboard:player-name", playerName.trim() || "Player");
     const roomCode = generateRoomCode();
     const initial = createGameState(
       roomCode,
       "teams",
       playerName.trim() || "Player",
+      kind,
     );
     initial.seats.red.peerId = seatPeerId(roomCode, "red");
     initial.stateHash = calculateStateHash(initial);
@@ -464,6 +575,7 @@ export function CrossboardApp() {
     localColorRef.current = "red";
     setLocalColor("red");
     setOrientation("red");
+    setSelectedGame(kind);
     installState(initial);
     setView("lobby");
     setIsNetworked(true);
@@ -519,6 +631,7 @@ export function CrossboardApp() {
           meshRef.current = mesh;
           setLocalColor(color);
           setOrientation(color);
+          setSelectedGame(gameKindOf(next));
           setIsNetworked(true);
           installState(next);
           setView("lobby");
@@ -546,17 +659,43 @@ export function CrossboardApp() {
     }
   };
 
-  const startPractice = (mode: GameMode) => {
-    const started = createPracticeGame(mode, playerName.trim() || "You");
+  const startPractice = (
+    mode: GameMode,
+    kind: GameKind = selectedGame,
+  ) => {
+    const started = createPracticeGame(
+      mode,
+      playerName.trim() || "You",
+      kind,
+    );
     meshRef.current?.close();
     meshRef.current = null;
     localColorRef.current = "red";
     setLocalColor("red");
     setOrientation("red");
+    setSelectedGame(kind);
     setIsNetworked(false);
+    setSignalStatus("online");
     setConnectedColors([]);
-    installState(started, false);
-    setView("game");
+    installState(
+      kind === "checkers"
+        ? updateLobby(
+            createGameState(
+              "PRACTICE",
+              mode,
+              playerName.trim() || "You",
+              kind,
+            ),
+            { mode, seats: started.seats },
+            `practice-${kind}-${mode}`,
+          )
+        : started,
+      false,
+    );
+    setView(kind === "checkers" ? "lobby" : "game");
+    if (kind === "checkers") {
+      setNotice("Choose your checkers variation, then start when ready.");
+    }
     updateLocation();
   };
 
@@ -568,6 +707,7 @@ export function CrossboardApp() {
     localColorRef.current = storedColor;
     setLocalColor(storedColor);
     setOrientation(storedColor);
+    setSelectedGame(gameKindOf(state));
     installState(state);
     setView(state.phase === "lobby" ? "lobby" : "game");
     setIsNetworked(true);
@@ -594,99 +734,182 @@ export function CrossboardApp() {
     updateLocation();
   };
 
+  const commitLobbyMutation = (
+    command: (current: GameState) => GameState,
+  ) =>
+    runLobbyCommand(gameRef, commitState, (current) => {
+      if (
+        electCoordinator(
+          current,
+          localColorRef.current,
+          connectedRef.current,
+        ) !== localColorRef.current
+      ) {
+        return current;
+      }
+      return command(current);
+    });
+
   const changeMode = (mode: GameMode) => {
-    if (!game || coordinator !== localColor) {
-      return;
-    }
-    commitState(updateLobby(game, { mode }, `mode-${mode}`));
+    commitLobbyMutation((current) =>
+      updateLobby(current, { mode }, `mode-${mode}`),
+    );
+  };
+
+  const changeTeamAssignment = (color: PlayerColor, team: TeamId) => {
+    commitLobbyMutation((current) => {
+      if (current.mode !== "teams") {
+        return current;
+      }
+      const currentTeam = teamOf(color, current.teamAssignments);
+      if (currentTeam === team) {
+        return current;
+      }
+      const currentTeamSize = PLAYER_COLORS.filter(
+        (candidate) =>
+          teamOf(candidate, current.teamAssignments) === currentTeam,
+      ).length;
+      if (currentTeamSize <= 1) {
+        setNotice("Each side needs at least one seat.");
+        return current;
+      }
+      return updateLobby(
+        current,
+        {
+          teamAssignments: {
+            ...current.teamAssignments,
+            [color]: team,
+          },
+        },
+        `team-${color}-${team}`,
+      );
+    });
+  };
+
+  const changeCheckersPreset = (
+    preset: Exclude<CheckersPreset, "custom">,
+  ) => {
+    commitLobbyMutation((current) =>
+      gameKindOf(current) === "checkers"
+        ? updateLobby(
+            current,
+            { checkersRules: checkersRulesForPreset(preset) },
+            `checkers-preset-${preset}`,
+          )
+        : current,
+    );
+  };
+
+  const changeCheckersRule = (
+    rule: keyof Omit<CheckersRules, "preset">,
+    enabled: boolean,
+  ) => {
+    commitLobbyMutation((current) => {
+      if (gameKindOf(current) !== "checkers") {
+        return current;
+      }
+      const checkersRules: CheckersRules = {
+        ...current.checkersRules,
+        preset: "custom",
+        [rule]: enabled,
+      };
+      if (rule === "mandatoryCapture" && !enabled) {
+        checkersRules.maximumCapture = false;
+      }
+      return updateLobby(
+        current,
+        { checkersRules },
+        `checkers-rule-${rule}-${enabled ? "on" : "off"}`,
+      );
+    });
   };
 
   const changeSeatController = (
     color: PlayerColor,
     controller: SeatController,
   ) => {
-    if (!game || coordinator !== localColor || color === localColor) {
-      return;
-    }
-    const seat = game.seats[color];
-    if (seat.controller === "human") {
-      return;
-    }
-    const seats = {
-      ...game.seats,
-      [color]: {
-        color,
-        controller,
-        name:
-          controller === "computer"
-            ? `Computer ${COLOR_LABELS[color]}`
-            : "Open seat",
-      },
-    };
-    commitState(updateLobby(game, { seats }, `seat-${color}-${controller}`));
+    commitLobbyMutation((current) => {
+      const local = localColorRef.current;
+      const seat = current.seats[color];
+      if (
+        color === local ||
+        seat.controller === "human" ||
+        (!isNetworked && controller === "open")
+      ) {
+        return current;
+      }
+      const seats = {
+        ...current.seats,
+        [color]: {
+          color,
+          controller,
+          name:
+            controller === "computer"
+              ? `Computer ${COLOR_LABELS[color]}`
+              : "Open seat",
+        },
+      };
+      return updateLobby(
+        current,
+        { seats },
+        `seat-${color}-${controller}`,
+      );
+    });
   };
 
   const applyFriendsVsComputersPreset = () => {
-    if (!game || coordinator !== localColor) {
-      return;
-    }
-    const opposite =
-      localColor === "red"
-        ? "yellow"
-        : localColor === "yellow"
-          ? "red"
-          : localColor === "blue"
-            ? "green"
-            : "blue";
-    const seats = { ...game.seats };
-    PLAYER_COLORS.forEach((color) => {
-      if (color === localColor || seats[color].controller === "human") {
-        return;
-      }
-      const controller = color === opposite ? "open" : "computer";
-      seats[color] = {
-        color,
-        controller,
-        name:
-          controller === "open"
-            ? "Open seat"
-            : `Computer ${COLOR_LABELS[color]}`,
-      };
-    });
-    commitState(
-      updateLobby(
-        game,
-        { mode: "teams", seats },
-        "preset-friends-v-computers",
+    commitLobbyMutation((current) =>
+      configureFriendsVsComputers(
+        current,
+        localColorRef.current,
+        isNetworked,
       ),
     );
   };
 
   const beginGame = () => {
-    if (!game || coordinator !== localColor) {
-      return;
-    }
-    const hasOpenSeat = PLAYER_COLORS.some(
-      (color) => game.seats[color].controller === "open",
-    );
-    const missingHuman = PLAYER_COLORS.some(
-      (color) =>
-        game.seats[color].controller === "human" &&
-        !humanSeatIsPresent(color, localColor, connectedColors),
-    );
-    if (hasOpenSeat || missingHuman) {
-      setNotice(
-        hasOpenSeat
-          ? "Fill all four seats before starting."
-          : "A human player is still reconnecting.",
+    const started = commitLobbyMutation((current) => {
+      const local = localColorRef.current;
+      const connected = connectedRef.current;
+      const hasOpenSeat = PLAYER_COLORS.some(
+        (color) => current.seats[color].controller === "open",
       );
-      return;
+      const missingHuman = PLAYER_COLORS.some(
+        (color) =>
+          current.seats[color].controller === "human" &&
+          !humanSeatIsPresent(color, local, connected),
+      );
+      const hasInvalidTeams =
+        current.mode === "teams" &&
+        new Set(
+          PLAYER_COLORS.map((color) =>
+            teamOf(color, current.teamAssignments),
+          ),
+        ).size < 2;
+      if (hasOpenSeat || missingHuman || hasInvalidTeams) {
+        setNotice(
+          hasOpenSeat
+            ? "Fill all four seats before starting."
+            : missingHuman
+              ? "A human player is still reconnecting."
+              : "Put at least one seat on each team.",
+        );
+        return current;
+      }
+      return startGame(current);
+    });
+    if (started?.phase === "playing") {
+      setSelected(null);
+      setView("game");
     }
-    const started = startGame(game);
-    commitState(started);
-    setSelected(null);
-    setView("game");
   };
+
+  const activeSelection =
+    game?.continuationFrom &&
+    game.turn === localColor &&
+    game.seats[localColor].controller === "human"
+      ? game.continuationFrom
+      : selected;
 
   const makeMove = (from: Coord, to: Coord) => {
     const current = gameRef.current;
@@ -699,7 +922,7 @@ export function CrossboardApp() {
       return;
     }
     commitState(next);
-    setSelected(null);
+    setSelected(next.continuationFrom);
   };
 
   const handleSquarePress = (coord: Coord) => {
@@ -711,16 +934,25 @@ export function CrossboardApp() {
       return;
     }
     const piece = game.board[squareKey(coord)];
-    if (selected) {
-      const legal = getLegalMovesForPiece(game, selected).some((move) =>
+    if (activeSelection) {
+      const legal = getLegalMovesForPiece(game, activeSelection).some((move) =>
         sameSquare(move.to, coord),
       );
       if (legal) {
-        makeMove(selected, coord);
+        makeMove(activeSelection, coord);
         return;
       }
       if (piece?.color === localColor) {
-        setSelected(coord);
+        const moves = getLegalMovesForPiece(game, coord);
+        if (moves.length) {
+          setSelected(coord);
+        } else if (gameKindOf(game) === "checkers") {
+          setNotice(
+            game.continuationFrom
+              ? "Keep jumping with the same checker."
+              : "Another checker has the required capture.",
+          );
+        }
         return;
       }
       setSelected(null);
@@ -728,7 +960,16 @@ export function CrossboardApp() {
       return;
     }
     if (piece?.color === localColor) {
-      setSelected(coord);
+      const moves = getLegalMovesForPiece(game, coord);
+      if (moves.length) {
+        setSelected(coord);
+      } else if (gameKindOf(game) === "checkers") {
+        setNotice(
+          game.continuationFrom
+            ? "Keep jumping with the same checker."
+            : "That checker has no legal move right now.",
+        );
+      }
     }
   };
 
@@ -759,13 +1000,18 @@ export function CrossboardApp() {
       return;
     }
 
-    if (isNetworked && coordinator !== localColor) {
+    const currentCoordinator = electCoordinator(
+      current,
+      localColorRef.current,
+      connectedRef.current,
+    );
+    if (isNetworked && currentCoordinator !== localColorRef.current) {
       const mesh = meshRef.current;
       if (!mesh) {
         setNotice("The room is reconnecting. Try undo again in a moment.");
         return;
       }
-      mesh.sendTo(seatPeerId(current.roomCode, coordinator), {
+      mesh.sendTo(seatPeerId(current.roomCode, currentCoordinator), {
         type: "undo-request",
         sender: mesh.localPeerId,
         stateHash: current.stateHash,
@@ -790,8 +1036,11 @@ export function CrossboardApp() {
   };
 
   const legalDestinations = useMemo(
-    () => (game && selected ? getLegalMovesForPiece(game, selected) : []),
-    [game, selected],
+    () =>
+      game && activeSelection
+        ? getLegalMovesForPiece(game, activeSelection)
+        : [],
+    [activeSelection, game],
   );
   const undoActionCount = game ? getUndoActionCount(game) : 0;
 
@@ -834,41 +1083,91 @@ export function CrossboardApp() {
 
         <section className="landing-grid">
           <div className="hero-copy">
-            <p className="eyebrow">Four-player chess, without a permanent host</p>
+            <p className="eyebrow">The four-player board-game menu</p>
             <h1>
-              Four sides.
+              Pick your
               <br />
-              <em>One board.</em>
+              <em>game.</em>
             </h1>
             <p className="hero-lede">
-              Play every color for themselves, or team up across the board. Add
-              casual computer opponents, invite friends, and keep the game alive
-              when the room creator drops.
+              Chess or checkers, every color for themselves or custom
+              Warm-versus-Cool teams. Add casual computer opponents, invite
+              friends, and keep
+              playing when the room creator drops.
             </p>
+            <div className="game-menu" aria-label="Choose a game">
+              <button
+                className={`game-choice${selectedGame === "chess" ? " active" : ""}`}
+                type="button"
+                aria-pressed={selectedGame === "chess"}
+                onClick={() => setSelectedGame("chess")}
+              >
+                <span className="game-choice-art chess-art" aria-hidden="true">
+                  ♞
+                </span>
+                <span>
+                  <small>Crossboard Capture</small>
+                  <strong>Four-player chess</strong>
+                  <em>Quick king-capture rules</em>
+                </span>
+                <b aria-hidden="true">↗</b>
+              </button>
+              <button
+                className={`game-choice${selectedGame === "checkers" ? " active" : ""}`}
+                type="button"
+                aria-pressed={selectedGame === "checkers"}
+                onClick={() => setSelectedGame("checkers")}
+              >
+                <span className="game-choice-art checkers-art" aria-hidden="true">
+                  <i />
+                  <i />
+                </span>
+                <span>
+                  <small>Crossboard Checkers</small>
+                  <strong>Four-player checkers</strong>
+                  <em>Chains, crowns, and variants</em>
+                </span>
+                <b aria-hidden="true">↗</b>
+              </button>
+            </div>
             <div className="hero-actions">
               <button
                 className="primary-button"
                 type="button"
-                onClick={createOnlineRoom}
+                onClick={() => void createOnlineRoom(selectedGame)}
               >
-                Create a room <span aria-hidden="true">→</span>
+                Create {selectedGame === "chess" ? "chess" : "checkers"} room{" "}
+                <span aria-hidden="true">→</span>
               </button>
-              <button
-                className="secondary-button practice-button"
-                type="button"
-                onClick={() => startPractice("teams")}
-              >
-                <span>Practice teams</span>
-                <small>You + Yellow vs Blue + Green</small>
-              </button>
-              <button
-                className="secondary-button practice-button"
-                type="button"
-                onClick={() => startPractice("ffa")}
-              >
-                <span>Practice free-for-all</span>
-                <small>Three computer rivals</small>
-              </button>
+              {selectedGame === "chess" ? (
+                <>
+                  <button
+                    className="secondary-button practice-button"
+                    type="button"
+                    onClick={() => startPractice("teams", "chess")}
+                  >
+                    <span>Practice teams</span>
+                    <small>You + Yellow vs Blue + Green</small>
+                  </button>
+                  <button
+                    className="secondary-button practice-button"
+                    type="button"
+                    onClick={() => startPractice("ffa", "chess")}
+                  >
+                    <span>Practice free-for-all</span>
+                    <small>Three computer rivals</small>
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="secondary-button practice-button"
+                  type="button"
+                  onClick={() => startPractice("ffa", "checkers")}
+                >
+                  <span>Set up checkers practice</span>
+                  <small>Choose teams and variation before play</small>
+                </button>
+              )}
             </div>
             <div className="promise-row" aria-label="Game features">
               <span>
@@ -925,8 +1224,8 @@ export function CrossboardApp() {
               </button>
             </div>
             <p className="panel-note">
-              The room continues while at least one human player keeps a copy
-              open.
+              Invite links carry the room and its game. The match continues
+              while one human keeps a copy open.
             </p>
             <div className="mini-network" aria-hidden="true">
               <span className="network-node node-red">●</span>
@@ -958,11 +1257,16 @@ export function CrossboardApp() {
 
         <section className="rules-preview" aria-label="How Crossboard works">
           <article>
-            <span>✣</span>
-            <h2>A real four-way board</h2>
+            <span>{selectedGame === "chess" ? "♞" : "●"}</span>
+            <h2>
+              {selectedGame === "chess"
+                ? "Fast four-way chess"
+                : "Checkers with options"}
+            </h2>
             <p>
-              Standard piece movement on a 14×14 cross, with a quick king-capture
-              ruleset built for casual games.
+              {selectedGame === "chess"
+                ? "Standard piece movement on a 14×14 cross with a quick king-capture finish."
+                : "Toggle flying kings, backward captures, forced jumps, longest chains, and crowning behavior."}
             </p>
           </article>
           <article>
@@ -974,11 +1278,11 @@ export function CrossboardApp() {
             </p>
           </article>
           <article>
-            <span>♞</span>
-            <h2>Bots that make you think</h2>
+            <span>✣</span>
+            <h2>Teams or free-for-all</h2>
             <p>
-              A bounded four-ply search plays sensible moves without pretending
-              to be a grandmaster.
+              Assign each seat to the Warm or Cool team, with casual computer
+              players ready for any empty seat.
             </p>
           </article>
         </section>
@@ -993,6 +1297,7 @@ export function CrossboardApp() {
 
   if (view === "lobby") {
     const isCoordinator = coordinator === localColor;
+    const isCheckers = gameKindOf(game) === "checkers";
     const hasOpen = PLAYER_COLORS.some(
       (color) => game.seats[color].controller === "open",
     );
@@ -1001,6 +1306,12 @@ export function CrossboardApp() {
         game.seats[color].controller === "human" &&
         !humanSeatIsPresent(color, localColor, connectedColors),
     );
+    const warmCount = PLAYER_COLORS.filter(
+      (color) => teamOf(color, game.teamAssignments) === "warm",
+    ).length;
+    const coolCount = PLAYER_COLORS.length - warmCount;
+    const hasInvalidTeams =
+      game.mode === "teams" && (warmCount === 0 || coolCount === 0);
 
     return (
       <main className="site-shell lobby-shell">
@@ -1010,9 +1321,14 @@ export function CrossboardApp() {
             <span>Crossboard</span>
           </button>
           <div className="room-meta">
-            <button className="room-code-button" type="button" onClick={copyInvite}>
-              Room {game.roomCode} <span>{copied ? "Copied" : "Copy invite"}</span>
-            </button>
+            {isNetworked ? (
+              <button className="room-code-button" type="button" onClick={copyInvite}>
+                Room {game.roomCode}{" "}
+                <span>{copied ? "Copied" : "Copy invite"}</span>
+              </button>
+            ) : (
+              <span className="room-code-button">Local setup</span>
+            )}
             <span className={`connection-pill status-${signalStatus}`}>
               <span className="status-dot" /> {connectionLabel}
             </span>
@@ -1021,31 +1337,42 @@ export function CrossboardApp() {
 
         <section className="lobby-heading">
           <div>
-            <p className="eyebrow">Set the table</p>
+            <p className="eyebrow">
+              {isCheckers ? "Four-player checkers" : "Crossboard Capture"}
+            </p>
             <h1>Build your four.</h1>
             <p>
-              Opposite colors are partners in Teams. Add a computer to your
-              opposite color for an instant teammate; open seats wait for an
-              invite.
+              Assign every seat to Warm or Cool in Teams
+              {isCheckers ? "; teammates can’t capture each other" : ""}.
+              Computers are ready immediately; open seats wait for an invite.
             </p>
           </div>
-          <div className="mode-switch" aria-label="Game mode">
-            <button
-              type="button"
-              className={game.mode === "teams" ? "active" : ""}
-              disabled={!isCoordinator}
-              onClick={() => changeMode("teams")}
-            >
-              Teams <small>2 vs 2</small>
-            </button>
-            <button
-              type="button"
-              className={game.mode === "ffa" ? "active" : ""}
-              disabled={!isCoordinator}
-              onClick={() => changeMode("ffa")}
-            >
-              Free-for-all <small>Last king</small>
-            </button>
+          <div className="lobby-mode-panel">
+            <div className="mode-switch" aria-label="Game mode">
+              <button
+                type="button"
+                className={game.mode === "teams" ? "active" : ""}
+                disabled={!isCoordinator}
+                onClick={() => changeMode("teams")}
+              >
+                Teams <small>Choose sides</small>
+              </button>
+              <button
+                type="button"
+                className={game.mode === "ffa" ? "active" : ""}
+                disabled={!isCoordinator}
+                onClick={() => changeMode("ffa")}
+              >
+                Free-for-all{" "}
+                <small>{isCheckers ? "Last color" : "Last king"}</small>
+              </button>
+            </div>
+            {game.mode === "teams" ? (
+              <p className="team-counts" aria-label="Team sizes">
+                <span className="warm-count">Warm {warmCount}</span>
+                <span className="cool-count">Cool {coolCount}</span>
+              </p>
+            ) : null}
           </div>
         </section>
 
@@ -1059,7 +1386,9 @@ export function CrossboardApp() {
                 connectedColors={connectedColors}
                 active={false}
                 canManage={isCoordinator}
+                allowOpenSeats={isNetworked}
                 onChangeController={changeSeatController}
+                onChangeTeam={changeTeamAssignment}
               />
             </div>
             <div className="west-seat">
@@ -1070,13 +1399,28 @@ export function CrossboardApp() {
                 connectedColors={connectedColors}
                 active={false}
                 canManage={isCoordinator}
+                allowOpenSeats={isNetworked}
                 onChangeController={changeSeatController}
+                onChangeTeam={changeTeamAssignment}
               />
             </div>
-            <div className="mini-board-logo" aria-hidden="true">
-              <span>♜</span><span>♞</span><span>♝</span>
-              <span>♟</span><b>✣</b><span>♟</span>
-              <span>♝</span><span>♞</span><span>♜</span>
+            <div
+              className={`mini-board-logo${isCheckers ? " checker-logo" : ""}`}
+              aria-hidden="true"
+            >
+              {isCheckers ? (
+                <>
+                  <span>●</span><span>○</span><span>●</span>
+                  <span>○</span><b>♛</b><span>○</span>
+                  <span>●</span><span>○</span><span>●</span>
+                </>
+              ) : (
+                <>
+                  <span>♜</span><span>♞</span><span>♝</span>
+                  <span>♟</span><b>✣</b><span>♟</span>
+                  <span>♝</span><span>♞</span><span>♜</span>
+                </>
+              )}
             </div>
             <div className="east-seat">
               <SeatCard
@@ -1086,7 +1430,9 @@ export function CrossboardApp() {
                 connectedColors={connectedColors}
                 active={false}
                 canManage={isCoordinator}
+                allowOpenSeats={isNetworked}
                 onChangeController={changeSeatController}
+                onChangeTeam={changeTeamAssignment}
               />
             </div>
             <div className="south-seat">
@@ -1097,31 +1443,140 @@ export function CrossboardApp() {
                 connectedColors={connectedColors}
                 active={false}
                 canManage={isCoordinator}
+                allowOpenSeats={isNetworked}
                 onChangeController={changeSeatController}
+                onChangeTeam={changeTeamAssignment}
               />
             </div>
           </div>
 
           <aside className="lobby-sidebar">
+            {isCheckers ? (
+              <section className="checkers-options" aria-label="Checkers rules">
+                <div className="options-heading">
+                  <div>
+                    <span>Checkers variation</span>
+                    <strong>
+                      {game.checkersRules.preset === "custom"
+                        ? "Custom rules"
+                        : `${game.checkersRules.preset[0].toUpperCase()}${game.checkersRules.preset.slice(1)}`}
+                    </strong>
+                  </div>
+                  <span>{isCoordinator ? "You choose" : "Room setting"}</span>
+                </div>
+                <div className="preset-tabs" aria-label="Rules preset">
+                  {(["american", "international", "house"] as const).map(
+                    (preset) => (
+                      <button
+                        type="button"
+                        className={
+                          game.checkersRules.preset === preset ? "active" : ""
+                        }
+                        disabled={!isCoordinator}
+                        onClick={() => changeCheckersPreset(preset)}
+                        key={preset}
+                      >
+                        {preset === "american"
+                          ? "American"
+                          : preset === "international"
+                            ? "International"
+                            : "House"}
+                      </button>
+                    ),
+                  )}
+                </div>
+                <div className="rule-toggle-list">
+                  {(
+                    [
+                      [
+                        "flyingKings",
+                        "Flying kings",
+                        "Kings slide and capture across open diagonals.",
+                      ],
+                      [
+                        "backwardCaptures",
+                        "Backward captures",
+                        "Uncrowned pieces may jump in every direction.",
+                      ],
+                      [
+                        "mandatoryCapture",
+                        "Must capture",
+                        "A jump takes priority over an ordinary move.",
+                      ],
+                      [
+                        "maximumCapture",
+                        "Longest chain",
+                        "Only a route with the most available jumps is legal.",
+                      ],
+                      [
+                        "continueAfterCrowning",
+                        "Crown and continue",
+                        "A newly crowned king may finish its capture chain.",
+                      ],
+                    ] as const
+                  ).map(([rule, label, help]) => (
+                    <label className="rule-toggle" key={rule}>
+                      <input
+                        type="checkbox"
+                        checked={game.checkersRules[rule]}
+                        disabled={
+                          !isCoordinator ||
+                          (rule === "maximumCapture" &&
+                            !game.checkersRules.mandatoryCapture) ||
+                          (rule === "continueAfterCrowning" &&
+                            game.checkersRules.deferredPromotion)
+                        }
+                        onChange={(event) =>
+                          changeCheckersRule(rule, event.target.checked)
+                        }
+                      />
+                      <span>
+                        <b>{label}</b>
+                        <small>{help}</small>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <div className="sequence-timing-note">
+                  <strong>Sequence timing</strong>
+                  <span>
+                    Captures{" "}
+                    {game.checkersRules.deferredCaptureRemoval
+                      ? "leave the board after the full chain"
+                      : "leave the board after each jump"}
+                    ; promotion{" "}
+                    {game.checkersRules.deferredPromotion
+                      ? "activates when the turn ends"
+                      : "activates on reaching the far edge"}.
+                  </span>
+                </div>
+              </section>
+            ) : null}
             <div className="health-card">
               <div className="health-icon" aria-hidden="true">⟲</div>
               <div>
-                <span>Room continuity</span>
+                <span>
+                  {isNetworked ? "Room continuity" : "Local practice"}
+                </span>
                 <strong>
-                  {isCoordinator
-                    ? "You’re keeping the room running"
-                    : `${game.seats[coordinator].name} is coordinating`}
+                  {isNetworked
+                    ? isCoordinator
+                      ? "You’re keeping the room running"
+                      : `${game.seats[coordinator].name} is coordinating`
+                    : "Computers run in this browser"}
                 </strong>
               </div>
             </div>
-            <details className="plain-details">
-              <summary>How this room stays open</summary>
-              <p>
-                Everyone keeps the current game. If the coordinator disconnects,
-                another connected human takes over. Rejoining players catch up
-                from the others.
-              </p>
-            </details>
+            {isNetworked ? (
+              <details className="plain-details">
+                <summary>How this room stays open</summary>
+                <p>
+                  Everyone keeps the current game. If the coordinator
+                  disconnects, another connected human takes over. Rejoining
+                  players catch up from the others.
+                </p>
+              </details>
+            ) : null}
             {isCoordinator ? (
               <button
                 className="preset-button"
@@ -1129,14 +1584,23 @@ export function CrossboardApp() {
                 onClick={applyFriendsVsComputersPreset}
               >
                 <span>Recommended setup</span>
-                <b>Two friends vs two computers</b>
+                <b>
+                  {isNetworked
+                    ? "Two friends vs two computers"
+                    : "You + a computer vs two computers"}
+                </b>
               </button>
             ) : null}
             <div className="lobby-actions">
               <button
                 className="primary-button"
                 type="button"
-                disabled={!isCoordinator || hasOpen || hasMissingHuman}
+                disabled={
+                  !isCoordinator ||
+                  hasOpen ||
+                  hasMissingHuman ||
+                  hasInvalidTeams
+                }
                 onClick={beginGame}
               >
                 Start game <span aria-hidden="true">→</span>
@@ -1148,7 +1612,9 @@ export function CrossboardApp() {
                     ? "Fill all four seats to start."
                     : hasMissingHuman
                       ? "Waiting for a player to reconnect."
-                      : "Everyone is ready."}
+                      : hasInvalidTeams
+                        ? "Put at least one seat on each team."
+                        : "Everyone is ready."}
               </p>
             </div>
           </aside>
@@ -1159,19 +1625,25 @@ export function CrossboardApp() {
   }
 
   const activeSeat = game.seats[game.turn];
+  const isCheckers = gameKindOf(game) === "checkers";
   const isMyTurn =
     game.phase === "playing" &&
     game.turn === localColor &&
     activeSeat.controller === "human";
   const boardInteractive = isMyTurn && !botThinking;
+  const turnAppearance = playerAppearance(
+    game.turn,
+    game.mode,
+    game.teamAssignments,
+  );
   const statusHeading =
     game.phase === "finished"
       ? describeWinner(game)
       : botThinking
-        ? `Computer is thinking · ${COLOR_LABELS[game.turn]}`
+        ? `${isCheckers && game.continuationFrom ? "Computer is chaining jumps" : "Computer is thinking"} · ${turnAppearance.label}`
         : isMyTurn
-          ? `Your turn · ${COLOR_LABELS[localColor]}`
-          : `${activeSeat.name}’s turn · ${COLOR_LABELS[game.turn]}`;
+          ? `${isCheckers && game.continuationFrom ? "Keep jumping" : "Your turn"} · ${turnAppearance.label}`
+          : `${displaySeatName(game, game.turn)}’s turn · ${turnAppearance.label}`;
 
   return (
     <main className="game-shell">
@@ -1195,9 +1667,15 @@ export function CrossboardApp() {
         </div>
       </header>
 
-      <section className={`turn-banner banner-${game.turn}`} aria-live="polite">
+      <section
+        className={`turn-banner banner-${game.turn} ${turnAppearance.paletteClass}`}
+        aria-live="polite"
+      >
         <div>
-          <span className={`color-token token-${game.turn}`} aria-hidden="true">
+          <span
+            className={`color-token token-${game.turn} ${turnAppearance.paletteClass}`}
+            aria-hidden="true"
+          >
             {COLOR_SYMBOLS[game.turn]}
           </span>
           <div>
@@ -1215,31 +1693,14 @@ export function CrossboardApp() {
           <div className="player-chip-row">
             {PLAYER_COLORS.map((color) => {
               const seat = game.seats[color];
+              const appearance = playerAppearance(
+                color,
+                game.mode,
+                game.teamAssignments,
+              );
               const connected =
                 seat.controller !== "human" ||
                 humanSeatIsPresent(color, localColor, connectedColors);
-              const isTeammate =
-                game.mode === "teams" &&
-                teamOf(color) === teamOf(localColor);
-              const playerStatus = game.eliminated.includes(color)
-                ? "King captured"
-                : color === localColor
-                  ? game.mode === "teams"
-                    ? "You · Your team"
-                    : "You"
-                  : seat.controller === "computer"
-                    ? isTeammate
-                      ? "Computer · Your teammate"
-                      : game.mode === "teams"
-                        ? "Computer · Opponent"
-                        : "Computer"
-                    : connected
-                      ? isTeammate
-                        ? "Connected · Your teammate"
-                        : game.mode === "teams"
-                          ? "Connected · Opponent"
-                          : "Connected"
-                      : "Reconnecting";
               return (
                 <div
                   className={`player-chip chip-${color}${
@@ -1247,12 +1708,32 @@ export function CrossboardApp() {
                   }${game.eliminated.includes(color) ? " is-eliminated" : ""}`}
                   key={color}
                 >
-                  <span className={`color-token token-${color}`}>
+                  <span
+                    className={`color-token token-${color} ${appearance.paletteClass}`}
+                  >
                     {COLOR_SYMBOLS[color]}
                   </span>
                   <span>
-                    <b>{seat.name}</b>
-                    <small>{playerStatus}</small>
+                    <b>{displaySeatName(game, color)}</b>
+                    <small>
+                      {game.eliminated.includes(color)
+                        ? isCheckers
+                          ? "No pieces or moves"
+                          : "King captured"
+                        : `${appearance.label}${
+                            appearance.team
+                              ? ` · ${TEAM_LABELS[appearance.team]}`
+                              : ""
+                          } · ${
+                            seat.controller === "computer"
+                              ? "Computer"
+                              : color === localColor
+                                ? "You"
+                                : connected
+                                  ? "Connected"
+                                  : "Reconnecting"
+                          }`}
+                    </small>
                   </span>
                 </div>
               );
@@ -1263,7 +1744,7 @@ export function CrossboardApp() {
             <GameBoard
               game={game}
               orientation={orientation}
-              selected={selected}
+              selected={activeSelection}
               interactive={boardInteractive}
               onSquarePress={handleSquarePress}
             />
@@ -1283,7 +1764,7 @@ export function CrossboardApp() {
                     ? "Make a move before using undo"
                     : isNetworked && coordinator !== localColor
                       ? `Rewind the shared turn through ${game.seats[coordinator].name}`
-                      : "Rewind the latest human move and any computer replies"
+                      : "Rewind the latest human turn and any computer replies"
                 }
                 onClick={undoTurn}
               >
@@ -1291,11 +1772,11 @@ export function CrossboardApp() {
               </button>
             </div>
             <span>
-              Viewing from <b>{COLOR_LABELS[orientation]}</b>
+              Viewing from <b>{POSITION_LABELS[orientation]}</b>
             </span>
           </div>
 
-          {selected && legalDestinations.length ? (
+          {activeSelection && legalDestinations.length ? (
             <div className="legal-tray" aria-label="Legal moves">
               <span>Legal moves</span>
               <div>
@@ -1303,7 +1784,7 @@ export function CrossboardApp() {
                   <button
                     type="button"
                     key={squareKey(move.to)}
-                    onClick={() => makeMove(selected, move.to)}
+                    onClick={() => makeMove(activeSelection, move.to)}
                   >
                     {squareName(move.to)}
                   </button>
@@ -1319,7 +1800,8 @@ export function CrossboardApp() {
               <div>
                 <span>Position</span>
                 <strong>
-                  Move {game.history.length} · {game.mode === "teams" ? "Teams" : "Free-for-all"}
+                  {isCheckers ? "Jump" : "Move"} {game.history.length} ·{" "}
+                  {game.mode === "teams" ? "Teams" : "Free-for-all"}
                 </strong>
               </div>
               <span className="sync-check" title={`State ${game.stateHash}`}>
@@ -1331,28 +1813,50 @@ export function CrossboardApp() {
                 game.history
                   .slice(-12)
                   .reverse()
-                  .map((move, index) => (
-                    <div
-                      className={`history-row${index === 0 ? " latest" : ""}`}
-                      key={move.id}
-                    >
-                      <span className={`history-color token-${move.color}`}>
-                        {COLOR_SYMBOLS[move.color]}
-                      </span>
-                      <div>
-                        <b>
-                          {COLOR_LABELS[move.color]} · {PIECE_LABELS[move.piece]}
-                        </b>
-                        <span>
-                          {move.notation}
-                          {move.eliminated
-                            ? ` · ${COLOR_LABELS[move.eliminated]} eliminated`
-                            : ""}
+                  .map((move, index) => {
+                    const appearance = playerAppearance(
+                      move.color,
+                      game.mode,
+                      game.teamAssignments,
+                    );
+                    const eliminatedColors =
+                      move.eliminatedColors ??
+                      (move.eliminated ? [move.eliminated] : []);
+                    const eliminatedLabels = eliminatedColors
+                      .map(
+                        (color) =>
+                          playerAppearance(
+                            color,
+                            game.mode,
+                            game.teamAssignments,
+                          ).label,
+                      )
+                      .join(" + ");
+                    return (
+                      <div
+                        className={`history-row${index === 0 ? " latest" : ""}`}
+                        key={move.id}
+                      >
+                        <span
+                          className={`history-color token-${move.color} ${appearance.paletteClass}`}
+                        >
+                          {COLOR_SYMBOLS[move.color]}
                         </span>
+                        <div>
+                          <b>
+                            {appearance.label} · {PIECE_LABELS[move.piece]}
+                          </b>
+                          <span>
+                            {move.notation}
+                            {eliminatedLabels
+                              ? ` · ${eliminatedLabels} eliminated`
+                              : ""}
+                          </span>
+                        </div>
+                        <small>#{move.revision}</small>
                       </div>
-                      <small>#{move.revision}</small>
-                    </div>
-                  ))
+                    );
+                  })
               ) : (
                 <p className="empty-history">
                   The opening move will appear here.
@@ -1382,21 +1886,68 @@ export function CrossboardApp() {
             </p>
           </section>
 
-          <details className="side-card rules-card">
-            <summary>Crossboard Capture v1 rules</summary>
-            <ul>
-              <li>Capture a king to eliminate that color.</li>
-              <li>In Teams, the first enemy king captured ends the match.</li>
-              <li>No castling or en passant; pawns auto-promote to queens.</li>
-              <li>Moves do not stop your own king entering danger.</li>
-            </ul>
-          </details>
+          {isCheckers ? (
+            <details className="side-card rules-card">
+              <summary>Checkers rules · {game.checkersRules.preset}</summary>
+              <ul>
+                <li>
+                  {game.mode === "teams"
+                    ? "Warm teammates and Cool teammates block one another and can’t be captured."
+                    : "Every other color can be captured in free-for-all."}
+                </li>
+                <li>
+                  {game.checkersRules.flyingKings
+                    ? "Kings fly along open diagonals."
+                    : "Kings move one diagonal square at a time."}
+                </li>
+                <li>
+                  {game.checkersRules.backwardCaptures
+                    ? "Men may capture backward."
+                    : "Men capture forward only."}
+                </li>
+                <li>
+                  {game.checkersRules.mandatoryCapture
+                    ? game.checkersRules.maximumCapture
+                      ? "Captures are mandatory, and the longest chain wins."
+                      : "Captures are mandatory when available."
+                    : "Captures are optional."}
+                </li>
+                <li>
+                  A color is out when it has no pieces or no legal move.
+                </li>
+                {game.checkersRules.deferredCaptureRemoval ||
+                game.checkersRules.deferredPromotion ? (
+                  <li>
+                    {game.checkersRules.deferredCaptureRemoval
+                      ? "Captured pieces stay as blockers until the jump sequence ends. "
+                      : ""}
+                    {game.checkersRules.deferredPromotion
+                      ? "A new king activates after that turn."
+                      : ""}
+                  </li>
+                ) : null}
+              </ul>
+            </details>
+          ) : (
+            <details className="side-card rules-card">
+              <summary>Crossboard Capture v1 rules</summary>
+              <ul>
+                <li>Capture a king to eliminate that color.</li>
+                <li>In Teams, the first enemy king captured ends the match.</li>
+                <li>No castling or en passant; pawns auto-promote to queens.</li>
+                <li>Moves do not stop your own king entering danger.</li>
+              </ul>
+            </details>
+          )}
 
           {game.phase === "finished" ? (
             <section className="result-card">
               <span>Game complete</span>
               <h2>{describeWinner(game)}</h2>
-              <p>{game.history.length} moves across {game.round} rounds.</p>
+              <p>
+                {game.history.length} {isCheckers ? "steps" : "moves"} across{" "}
+                {game.round} rounds.
+              </p>
               <button className="primary-button" type="button" onClick={leaveRoom}>
                 Back to home
               </button>

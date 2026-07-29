@@ -33,7 +33,7 @@ export interface MeshCallbacks {
   onNotice: (message: string) => void;
 }
 
-const PEER_PREFIX = "crossboard-v2";
+const PEER_PREFIX = "crossboard-v3";
 
 function cleanRoomCode(roomCode: string): string {
   return roomCode.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -326,6 +326,18 @@ export function electCoordinator(
       !state.eliminated.includes(color),
   );
   return elected ?? localColor;
+}
+
+export function coordinatorOwnsState(
+  state: GameState,
+  expectedStateHash: string,
+  localColor: PlayerColor,
+  connectedColors: PlayerColor[],
+): boolean {
+  return (
+    state.stateHash === expectedStateHash &&
+    electCoordinator(state, localColor, connectedColors) === localColor
+  );
 }
 
 export function undoRequesterFor(

@@ -1,6 +1,8 @@
 import {
   applyMove,
+  gameKindOf,
   getAllLegalMoves,
+  passTurn,
   squareKey,
   teamOf,
 } from "./engine";
@@ -19,6 +21,8 @@ const PIECE_VALUES: Record<PieceType, number> = {
   rook: 510,
   queen: 920,
   king: 20_000,
+  man: 100,
+  crowned: 320,
 };
 
 function deterministicNoise(value: string): number {
@@ -35,8 +39,11 @@ function positionalValue(type: PieceType, row: number, col: number): number {
   if (type === "knight" || type === "bishop") {
     return Math.round((8 - distanceFromCenter) * 3);
   }
-  if (type === "pawn") {
+  if (type === "pawn" || type === "man") {
     return Math.round((7 - distanceFromCenter) * 0.8);
+  }
+  if (type === "crowned") {
+    return Math.round((8 - distanceFromCenter) * 1.8);
   }
   return 0;
 }
@@ -55,17 +62,27 @@ function evaluate(state: GameState, perspective: PlayerColor): number {
     yellow: 0,
     green: 0,
   };
+  const pendingCaptured = new Set(
+    state.pendingCapturedSquares.map(squareKey),
+  );
 
   for (const [key, piece] of Object.entries(state.board)) {
+    if (pendingCaptured.has(key)) {
+      continue;
+    }
     const [row, col] = key.split(",").map(Number);
     totals[piece.color] +=
       PIECE_VALUES[piece.type] + positionalValue(piece.type, row, col);
   }
 
   if (state.mode === "teams") {
-    const ownTeam = teamOf(perspective);
+    const ownTeam = teamOf(perspective, state.teamAssignments);
     return PLAYER_COLORS.reduce((score, color) => {
-      return score + totals[color] * (teamOf(color) === ownTeam ? 1 : -1);
+      return (
+        score +
+        totals[color] *
+          (teamOf(color, state.teamAssignments) === ownTeam ? 1 : -1)
+      );
     }, 0);
   }
 
@@ -80,7 +97,9 @@ function evaluate(state: GameState, perspective: PlayerColor): number {
 
 function movePriority(state: GameState, move: Move, color: PlayerColor): number {
   const movingPiece = state.board[squareKey(move.from)];
-  const captured = state.board[squareKey(move.to)];
+  const captured = state.board[
+    squareKey(move.capturedSquare ?? move.to)
+  ];
   const captureScore = captured
     ? PIECE_VALUES[captured.type] * 10 - PIECE_VALUES[movingPiece.type]
     : 0;
@@ -115,7 +134,9 @@ function isFriendlyActor(
 ): boolean {
   return (
     actor === perspective ||
-    (state.mode === "teams" && teamOf(actor) === teamOf(perspective))
+    (state.mode === "teams" &&
+      teamOf(actor, state.teamAssignments) ===
+        teamOf(perspective, state.teamAssignments))
   );
 }
 
@@ -134,6 +155,18 @@ function search(
   const branchLimit = depth >= 3 ? 9 : depth === 2 ? 7 : 5;
   const moves = orderedMoves(state, actor, branchLimit);
   if (!moves.length) {
+    if (gameKindOf(state) === "checkers") {
+      const advanced = passTurn(state, actor);
+      if (advanced !== state) {
+        return search(
+          advanced,
+          depth - 1,
+          perspective,
+          alpha,
+          beta,
+        );
+      }
+    }
     return evaluate(state, perspective) - (actor === perspective ? 350 : 0);
   }
 

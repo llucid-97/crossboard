@@ -1,16 +1,22 @@
 # Crossboard
 
-Crossboard is a casual four-player chess game for the browser. It supports
-free-for-all games, opposite-seat teams, open invite seats, and computer
-opponents. Human players exchange moves directly over WebRTC; no player's
-machine needs to remain a permanent host.
+Crossboard is a casual four-player chess and checkers collection for the
+browser. It supports free-for-all games, configurable Warm/Cool teams, open
+invite seats, and computer opponents. Human players exchange moves directly over
+WebRTC; no player's machine needs to remain a permanent host.
 
 ## What is included
 
-- A responsive 14×14 cross board with four 16-piece armies.
-- **Free-for-all:** capture a king to eliminate that color; last king wins.
-- **Teams:** Red + Yellow versus Blue + Green; the first enemy king captured
-  ends the match.
+- A game menu for four-player Chess and four-player Checkers.
+- A responsive 14×14 cross board with four chess armies or four sets of twelve
+  checkers.
+- **Free-for-all:** survive as the last active color.
+- **Teams:** Red + Yellow versus Blue + Green by default, with every seat
+  assignable to either side. Checkers teammates block one another and cannot
+  capture each other.
+- American, International, and House checkers presets, plus switches for flying
+  kings, backward captures, mandatory captures, longest capture, and continuing
+  after crowning.
 - A deterministic, beam-limited four-ply minimax bot tuned for casual play.
 - One-click Teams practice with a computer teammate, or free-for-all practice
   against three computer rivals.
@@ -35,6 +41,23 @@ Crossboard deliberately uses a quick king-capture variant:
 These rules make four-player games easier to follow and keep the computer search
 small enough to run entirely in the browser.
 
+## Crossboard Checkers v1
+
+Each color begins with twelve men on the dark squares of its three-row home arm.
+Men move toward the opposite arm, captures can chain with the same piece, and a
+man crowns on the far edge. A color is eliminated when it has no pieces or no
+legal move.
+
+The room coordinator can choose a familiar preset or mix individual variation
+rules. In Teams, every same-side piece counts as a friendly blocker, so a
+capture can never jump or remove a teammate.
+
+The International preset defers captured-piece removal until a complete jump
+sequence ends and only activates a new king after that turn, matching the FMJD
+multiple-capture rules. Those timing mechanics remain attached when another
+International option is customized. House rules can still crown and continue
+immediately.
+
 ## How rooms stay online
 
 The deployed site serves the app, while PeerJS Cloud performs the initial
@@ -44,6 +67,9 @@ seat coordinates lobby controls and computer turns. If that browser leaves, the
 next human seat takes over. Online undo requests also pass through that
 coordinator, which publishes the rewound position to everyone as a new shared
 state.
+
+The current room/save protocol is schema v3. Verified schema-v1 and schema-v2
+chess recovery copies migrate locally before joining the v3 peer mesh.
 
 The app also saves a recovery copy in each player's browser. If every human
 closes the room, another device cannot resurrect it without a small persistence
@@ -77,6 +103,6 @@ Useful commands:
 Crossboard is published at
 [llucid-97.github.io/crossboard](https://llucid-97.github.io/crossboard/).
 Every push to `main` creates a static Next.js export and deploys it through
-GitHub Pages. The game logic, casual minimax computer players, and recovery
-snapshots all run in each browser. PeerJS supplies multiplayer discovery and
-WebRTC signalling; the game itself needs no application server or database.
+GitHub Pages. Both rules engines, casual minimax computer players, and recovery
+snapshots run in each browser. PeerJS supplies multiplayer discovery and WebRTC
+signalling; the games need no application server or database.

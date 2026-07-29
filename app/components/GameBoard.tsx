@@ -5,17 +5,18 @@ import {
   BOARD_SIZE,
   getLegalMovesForPiece,
   isPlayableSquare,
+  playerAppearance,
   sameSquare,
   squareKey,
   squareName,
 } from "../game/engine";
 import {
-  COLOR_LABELS,
   Coord,
   GameState,
   PIECE_GLYPHS,
   PIECE_LABELS,
   PlayerColor,
+  POSITION_LABELS,
 } from "../game/types";
 
 interface GameBoardProps {
@@ -52,19 +53,32 @@ function boardCoordForDisplay(
   }
 }
 
-function focusDisplaySquare(row: number, col: number): void {
+function focusDisplaySquare(
+  row: number,
+  col: number,
+  rowStep: number,
+  colStep: number,
+): void {
+  if (rowStep === 0 && colStep === 0) {
+    return;
+  }
   let nextRow = row;
   let nextCol = col;
-  for (let attempts = 0; attempts < BOARD_SIZE; attempts += 1) {
+  while (
+    nextRow >= 0 &&
+    nextRow < BOARD_SIZE &&
+    nextCol >= 0 &&
+    nextCol < BOARD_SIZE
+  ) {
     const target = document.querySelector<HTMLButtonElement>(
       `[data-display-square="${nextRow}-${nextCol}"]`,
     );
-    if (target) {
+    if (target && !target.disabled) {
       target.focus();
       return;
     }
-    nextRow = Math.max(0, Math.min(BOARD_SIZE - 1, nextRow));
-    nextCol = Math.max(0, Math.min(BOARD_SIZE - 1, nextCol));
+    nextRow += rowStep;
+    nextCol += colStep;
   }
 }
 
@@ -96,8 +110,10 @@ export function GameBoard({
     if (direction) {
       event.preventDefault();
       focusDisplaySquare(
-        Math.max(0, Math.min(BOARD_SIZE - 1, displayRow + direction[0])),
-        Math.max(0, Math.min(BOARD_SIZE - 1, displayCol + direction[1])),
+        displayRow + direction[0],
+        displayCol + direction[1],
+        direction[0],
+        direction[1],
       );
       return;
     }
@@ -111,7 +127,7 @@ export function GameBoard({
     <div
       className="game-board"
       role="grid"
-      aria-label={`Crossboard game board, oriented for ${COLOR_LABELS[orientation]}`}
+      aria-label={`Crossboard game board, oriented from ${POSITION_LABELS[orientation]}`}
     >
       {Array.from({ length: BOARD_SIZE * BOARD_SIZE }, (_, index) => {
         const displayRow = Math.floor(index / BOARD_SIZE);
@@ -133,15 +149,22 @@ export function GameBoard({
         const latest =
           !!lastMove &&
           (sameSquare(lastMove.from, coord) || sameSquare(lastMove.to, coord));
+        const appearance = piece
+          ? playerAppearance(
+              piece.color,
+              game.mode,
+              game.teamAssignments,
+            )
+          : null;
         const label = piece
-          ? `${COLOR_LABELS[piece.color]} ${PIECE_LABELS[piece.type]} on ${squareName(coord)}`
+          ? `${appearance?.label} ${PIECE_LABELS[piece.type]} on ${squareName(coord)}`
           : `Empty ${squareName(coord)}`;
         const classes = [
           "board-square",
           (coord.row + coord.col) % 2 === 0 ? "square-light" : "square-dark",
           selectedSquare ? "is-selected" : "",
           legalMove ? "is-legal" : "",
-          legalMove && piece ? "is-capture" : "",
+          legalMove && (piece || legalMove.capturedSquare) ? "is-capture" : "",
           latest ? "is-latest" : "",
         ]
           .filter(Boolean)
@@ -157,14 +180,31 @@ export function GameBoard({
               legalMove ? ", legal destination" : ""
             }`}
             aria-selected={selectedSquare}
-            tabIndex={selectedSquare ? 0 : -1}
+            tabIndex={
+              selectedSquare ||
+              (!selected &&
+                interactive &&
+                displayRow === 0 &&
+                displayCol === 3)
+                ? 0
+                : -1
+            }
             disabled={!interactive && !selectedSquare}
             onClick={() => onSquarePress(coord)}
             onKeyDown={(event) => handleKeyDown(event, displayRow, displayCol)}
           >
-            {piece ? (
+            {piece && (piece.type === "man" || piece.type === "crowned") ? (
               <span
-                className={`chess-piece piece-${piece.color}`}
+                className={`checker-piece piece-${piece.color} ${appearance?.paletteClass}${
+                  piece.type === "crowned" ? " is-crowned" : ""
+                }`}
+                aria-hidden="true"
+              >
+                {piece.type === "crowned" ? <span>♛</span> : null}
+              </span>
+            ) : piece ? (
+              <span
+                className={`chess-piece piece-${piece.color} ${appearance?.paletteClass}`}
                 aria-hidden="true"
               >
                 {PIECE_GLYPHS[piece.type]}
