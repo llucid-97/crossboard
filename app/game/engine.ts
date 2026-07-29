@@ -1,7 +1,9 @@
 import {
   BoardState,
+  ChessPieceType,
   COLOR_LABELS,
   Coord,
+  GameKind,
   GameMode,
   GameState,
   Move,
@@ -12,10 +14,33 @@ import {
   PLAYER_COLORS,
   SeatMap,
 } from "./types";
+import {
+  areAllies,
+  isPlayableSquare,
+  sameSquare,
+  squareKey,
+  squareName,
+  teamOf,
+} from "./board";
+import {
+  DEFAULT_CHECKERS_RULES,
+  createInitialCheckersBoard,
+  getAllCheckersLegalMoves,
+  getCheckersLegalMovesForPiece,
+  isCheckersPromotionSquare,
+} from "./checkers";
 
-export const BOARD_SIZE = 14;
+export {
+  areAllies,
+  BOARD_SIZE,
+  isPlayableSquare,
+  sameSquare,
+  squareKey,
+  squareName,
+  teamOf,
+} from "./board";
 
-const BACK_RANK: PieceType[] = [
+const BACK_RANK: ChessPieceType[] = [
   "rook",
   "knight",
   "bishop",
@@ -26,7 +51,7 @@ const BACK_RANK: PieceType[] = [
   "rook",
 ];
 
-const REVERSED_BACK_RANK: PieceType[] = [
+const REVERSED_BACK_RANK: ChessPieceType[] = [
   "rook",
   "knight",
   "bishop",
@@ -61,37 +86,6 @@ const KNIGHT_OFFSETS = [
   [2, -1],
   [2, 1],
 ] as const;
-
-export function isPlayableSquare(row: number, col: number): boolean {
-  if (row < 0 || row >= BOARD_SIZE || col < 0 || col >= BOARD_SIZE) {
-    return false;
-  }
-  return (row >= 3 && row <= 10) || (col >= 3 && col <= 10);
-}
-
-export function squareKey(coord: Coord): string {
-  return `${coord.row},${coord.col}`;
-}
-
-export function sameSquare(a: Coord, b: Coord): boolean {
-  return a.row === b.row && a.col === b.col;
-}
-
-export function squareName(coord: Coord): string {
-  return `${String.fromCharCode(97 + coord.col)}${BOARD_SIZE - coord.row}`;
-}
-
-export function teamOf(color: PlayerColor): 1 | 2 {
-  return color === "red" || color === "yellow" ? 1 : 2;
-}
-
-export function areAllies(
-  first: PlayerColor,
-  second: PlayerColor,
-  mode: GameMode,
-): boolean {
-  return first === second || (mode === "teams" && teamOf(first) === teamOf(second));
-}
 
 function placePiece(
   board: BoardState,
@@ -146,12 +140,18 @@ export function createGameState(
   roomCode: string,
   mode: GameMode = "teams",
   localName = "You",
+  gameKind: GameKind = "chess",
 ): GameState {
   const state: GameState = {
     schemaVersion: 1,
-    ruleset: "crossboard-capture-v1",
+    ruleset:
+      gameKind === "checkers"
+        ? "crossboard-checkers-v1"
+        : "crossboard-capture-v1",
+    gameKind,
     roomCode,
     mode,
+    checkersRules: { ...DEFAULT_CHECKERS_RULES },
     phase: "lobby",
     board: {},
     seats: createSeats(localName),
@@ -161,6 +161,7 @@ export function createGameState(
     history: [],
     eliminated: [],
     winners: null,
+    continuationFrom: null,
     lastActionId: `room-${roomCode}`,
     parentHash: "genesis",
     stateHash: "",
@@ -176,15 +177,24 @@ export function startGame(state: GameState): GameState {
   return stampState(state, {
     ...state,
     phase: "playing",
-    board: createInitialBoard(),
+    board:
+      gameKindOf(state) === "checkers"
+        ? createInitialCheckersBoard()
+        : createInitialBoard(),
     turn: "red",
     revision: state.revision + 1,
     round: 1,
     history: [],
     eliminated: [],
     winners: null,
+    continuationFrom: null,
     lastActionId: `start-${state.revision + 1}`,
   });
+}
+
+export function gameKindOf(state: GameState): GameKind {
+  return state.gameKind ??
+    (state.ruleset === "crossboard-checkers-v1" ? "checkers" : "chess");
 }
 
 function canLandOn(state: GameState, piece: Piece, coord: Coord): boolean {
@@ -277,6 +287,9 @@ function pawnMoves(state: GameState, piece: Piece, from: Coord): Move[] {
 }
 
 export function getLegalMovesForPiece(state: GameState, from: Coord): Move[] {
+  if (gameKindOf(state) === "checkers") {
+    return getCheckersLegalMovesForPiece(state, from);
+  }
   const piece = state.board[squareKey(from)];
   if (!piece || state.eliminated.includes(piece.color)) {
     return [];
@@ -306,10 +319,16 @@ export function getLegalMovesForPiece(state: GameState, from: Coord): Move[] {
           to: { row: from.row + rowStep, col: from.col + colStep },
         }))
         .filter((move) => canLandOn(state, piece, move.to));
+    case "man":
+    case "crowned":
+      return [];
   }
 }
 
 export function getAllLegalMoves(state: GameState, color: PlayerColor): Move[] {
+  if (gameKindOf(state) === "checkers") {
+    return getAllCheckersLegalMoves(state, color);
+  }
   if (state.eliminated.includes(color)) {
     return [];
   }
@@ -367,19 +386,19 @@ function determineWinners(
   return PLAYER_COLORS.filter((color) => teamOf(color) === winningTeam);
 }
 
-function isMoveLegal(state: GameState, move: Move): boolean {
-  return getLegalMovesForPiece(state, move.from).some((candidate) =>
+function matchingLegalMove(state: GameState, move: Move): Move | undefined {
+  return getLegalMovesForPiece(state, move.from).find((candidate) =>
     sameSquare(candidate.to, move.to),
   );
 }
 
-export function applyMove(state: GameState, move: Move): GameState {
+function applyChessMove(state: GameState, move: Move): GameState {
   const movingPiece = state.board[squareKey(move.from)];
   if (
     state.phase !== "playing" ||
     !movingPiece ||
     movingPiece.color !== state.turn ||
-    !isMoveLegal(state, move)
+    !matchingLegalMove(state, move)
   ) {
     return state;
   }
@@ -446,8 +465,110 @@ export function applyMove(state: GameState, move: Move): GameState {
     eliminated,
     winners,
     phase: winners ? "finished" : "playing",
+    continuationFrom: null,
     lastActionId: record.id,
   });
+}
+
+function applyCheckersMove(state: GameState, requestedMove: Move): GameState {
+  const movingPiece = state.board[squareKey(requestedMove.from)];
+  const move = matchingLegalMove(state, requestedMove);
+  if (
+    state.phase !== "playing" ||
+    !movingPiece ||
+    movingPiece.color !== state.turn ||
+    !move
+  ) {
+    return state;
+  }
+
+  const revision = state.revision + 1;
+  const board: BoardState = { ...state.board };
+  delete board[squareKey(move.from)];
+
+  const captured = move.capturedSquare
+    ? board[squareKey(move.capturedSquare)]
+    : undefined;
+  if (move.capturedSquare) {
+    delete board[squareKey(move.capturedSquare)];
+  }
+
+  const promoted =
+    movingPiece.type === "man" &&
+    isCheckersPromotionSquare(movingPiece.color, move.to);
+  board[squareKey(move.to)] = {
+    ...movingPiece,
+    type: promoted ? "crowned" : movingPiece.type,
+    hasMoved: true,
+  };
+
+  const eliminated = [...state.eliminated];
+  if (
+    captured &&
+    !eliminated.includes(captured.color) &&
+    !Object.values(board).some((piece) => piece.color === captured.color)
+  ) {
+    eliminated.push(captured.color);
+  }
+  const eliminatedColor =
+    captured && eliminated.includes(captured.color) &&
+    !state.eliminated.includes(captured.color)
+      ? captured.color
+      : undefined;
+  const winners = determineWinners(state.mode, eliminated);
+  const canContinueAfterPromotion =
+    !promoted || state.checkersRules.continueAfterCrowning;
+  const continuationState: GameState = {
+    ...state,
+    board,
+    continuationFrom: move.to,
+  };
+  const continuationMoves =
+    move.capturedSquare && canContinueAfterPromotion && !winners
+      ? getCheckersLegalMovesForPiece(continuationState, move.to)
+      : [];
+  const continued = continuationMoves.length > 0;
+  const nextTurn = continued
+    ? state.turn
+    : nextActiveColor(state.turn, eliminated);
+  const wrapped =
+    !continued &&
+    PLAYER_COLORS.indexOf(nextTurn) <= PLAYER_COLORS.indexOf(state.turn);
+  const notation = `${squareName(move.from)} ${captured ? "×" : "→"} ${squareName(move.to)}${promoted ? "=K" : ""}`;
+  const record: MoveRecord = {
+    ...move,
+    id: `${revision}-${movingPiece.color}-${squareKey(move.from)}-${squareKey(move.to)}`,
+    revision,
+    round: state.round,
+    color: movingPiece.color,
+    piece: movingPiece.type,
+    captured: captured?.type,
+    capturedColor: captured?.color,
+    eliminated: eliminatedColor,
+    continued,
+    notation,
+    promotion: promoted ? "crowned" : undefined,
+  };
+
+  return stampState(state, {
+    ...state,
+    board,
+    turn: nextTurn,
+    revision,
+    round: state.round + (wrapped ? 1 : 0),
+    history: [...state.history, record],
+    eliminated,
+    winners,
+    phase: winners ? "finished" : "playing",
+    continuationFrom: continued ? move.to : null,
+    lastActionId: record.id,
+  });
+}
+
+export function applyMove(state: GameState, move: Move): GameState {
+  return gameKindOf(state) === "checkers"
+    ? applyCheckersMove(state, move)
+    : applyChessMove(state, move);
 }
 
 export function passTurn(state: GameState, color: PlayerColor): GameState {
@@ -458,22 +579,47 @@ export function passTurn(state: GameState, color: PlayerColor): GameState {
   ) {
     return state;
   }
-  const nextTurn = nextActiveColor(color, state.eliminated);
+
+  let board = state.board;
+  let eliminated = state.eliminated;
+  let winners = state.winners;
+  if (gameKindOf(state) === "checkers") {
+    if (getAllLegalMoves(state, color).length) {
+      return state;
+    }
+    board = { ...state.board };
+    for (const [key, piece] of Object.entries(board)) {
+      if (piece.color === color) {
+        delete board[key];
+      }
+    }
+    eliminated = state.eliminated.includes(color)
+      ? state.eliminated
+      : [...state.eliminated, color];
+    winners = determineWinners(state.mode, eliminated);
+  }
+
+  const nextTurn = nextActiveColor(color, eliminated);
   const revision = state.revision + 1;
   const wrapped =
     PLAYER_COLORS.indexOf(nextTurn) <= PLAYER_COLORS.indexOf(color);
   return stampState(state, {
     ...state,
+    board,
     turn: nextTurn,
     revision,
     round: state.round + (wrapped ? 1 : 0),
+    eliminated,
+    winners,
+    phase: winners ? "finished" : "playing",
+    continuationFrom: null,
     lastActionId: `pass-${revision}-${color}`,
   });
 }
 
 export function updateLobby(
   state: GameState,
-  updates: Partial<Pick<GameState, "mode" | "seats">>,
+  updates: Partial<Pick<GameState, "mode" | "seats" | "checkersRules">>,
   action: string,
 ): GameState {
   if (state.phase !== "lobby") {
@@ -516,21 +662,40 @@ function stableStatePayload(state: GameState): string {
     const seat = state.seats[color];
     return [color, seat.controller, seat.name, seat.peerId ?? ""];
   });
-  const history = state.history.map((move) => [
-    move.id,
-    move.revision,
-    move.color,
-    move.piece,
-    move.from.row,
-    move.from.col,
-    move.to.row,
-    move.to.col,
-    move.captured ?? "",
-    move.eliminated ?? "",
-  ]);
+  const history = state.history.map((move) => {
+    const legacy = [
+      move.id,
+      move.revision,
+      move.color,
+      move.piece,
+      move.from.row,
+      move.from.col,
+      move.to.row,
+      move.to.col,
+      move.captured ?? "",
+      move.eliminated ?? "",
+    ];
+    return state.gameKind
+      ? [
+          ...legacy,
+          move.capturedColor ?? "",
+          move.capturedSquare?.row ?? "",
+          move.capturedSquare?.col ?? "",
+          move.promotion ?? "",
+          move.continued ? 1 : 0,
+        ]
+      : legacy;
+  });
   return JSON.stringify({
     schemaVersion: state.schemaVersion,
     ruleset: state.ruleset,
+    ...(state.gameKind
+      ? {
+          gameKind: state.gameKind,
+          checkersRules: state.checkersRules,
+          continuationFrom: state.continuationFrom,
+        }
+      : {}),
     roomCode: state.roomCode,
     mode: state.mode,
     phase: state.phase,

@@ -31,9 +31,13 @@ test("server-renders the Crossboard product shell", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>Crossboard — four-player chess, peer to peer<\/title>/i);
-  assert.match(html, /Four sides\./i);
-  assert.match(html, /Create a room/i);
+  assert.match(
+    html,
+    /<title>Crossboard — four-player chess and checkers<\/title>/i,
+  );
+  assert.match(html, /Pick your/i);
+  assert.match(html, /Four-player checkers/i);
+  assert.match(html, /Practice vs computers/i);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
 });
 
@@ -45,7 +49,7 @@ test("removes the disposable starter and records production metadata", async () 
   ]);
 
   assert.match(page, /CrossboardApp/);
-  assert.match(layout, /Crossboard — four-player chess, peer to peer/);
+  assert.match(layout, /Crossboard — four-player chess and checkers/);
   assert.match(packageJson, /"peerjs"/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("app/_sites-preview", projectRoot)));

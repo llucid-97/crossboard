@@ -9,7 +9,7 @@ test("exports a complete GitHub Pages entry point", async () => {
 
   assert.match(
     html,
-    /<title>Crossboard — four-player chess, peer to peer<\/title>/i,
+    /<title>Crossboard — four-player chess and checkers<\/title>/i,
   );
   assert.match(html, /\/crossboard\/_next\/static\//);
   assert.match(html, /https:\/\/llucid-97\.github\.io\/crossboard\/og\.png/);

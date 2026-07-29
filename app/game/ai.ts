@@ -19,6 +19,8 @@ const PIECE_VALUES: Record<PieceType, number> = {
   rook: 510,
   queen: 920,
   king: 20_000,
+  man: 100,
+  crowned: 320,
 };
 
 function deterministicNoise(value: string): number {
@@ -35,8 +37,11 @@ function positionalValue(type: PieceType, row: number, col: number): number {
   if (type === "knight" || type === "bishop") {
     return Math.round((8 - distanceFromCenter) * 3);
   }
-  if (type === "pawn") {
+  if (type === "pawn" || type === "man") {
     return Math.round((7 - distanceFromCenter) * 0.8);
+  }
+  if (type === "crowned") {
+    return Math.round((8 - distanceFromCenter) * 1.8);
   }
   return 0;
 }
@@ -80,7 +85,9 @@ function evaluate(state: GameState, perspective: PlayerColor): number {
 
 function movePriority(state: GameState, move: Move, color: PlayerColor): number {
   const movingPiece = state.board[squareKey(move.from)];
-  const captured = state.board[squareKey(move.to)];
+  const captured = state.board[
+    squareKey(move.capturedSquare ?? move.to)
+  ];
   const captureScore = captured
     ? PIECE_VALUES[captured.type] * 10 - PIECE_VALUES[movingPiece.type]
     : 0;

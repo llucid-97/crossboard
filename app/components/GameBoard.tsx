@@ -141,7 +141,7 @@ export function GameBoard({
           (coord.row + coord.col) % 2 === 0 ? "square-light" : "square-dark",
           selectedSquare ? "is-selected" : "",
           legalMove ? "is-legal" : "",
-          legalMove && piece ? "is-capture" : "",
+          legalMove && (piece || legalMove.capturedSquare) ? "is-capture" : "",
           latest ? "is-latest" : "",
         ]
           .filter(Boolean)
@@ -162,7 +162,16 @@ export function GameBoard({
             onClick={() => onSquarePress(coord)}
             onKeyDown={(event) => handleKeyDown(event, displayRow, displayCol)}
           >
-            {piece ? (
+            {piece && (piece.type === "man" || piece.type === "crowned") ? (
+              <span
+                className={`checker-piece piece-${piece.color}${
+                  piece.type === "crowned" ? " is-crowned" : ""
+                }`}
+                aria-hidden="true"
+              >
+                {piece.type === "crowned" ? <span>♛</span> : null}
+              </span>
+            ) : piece ? (
               <span
                 className={`chess-piece piece-${piece.color}`}
                 aria-hidden="true"
