@@ -14,6 +14,7 @@
   --green: #3b8c61;
   --shadow: 0 22px 70px rgba(35, 32, 24, 0.12);
   --radius: 22px;
+  --font-geist-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
 * {
