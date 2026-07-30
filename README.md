@@ -84,6 +84,8 @@ Peers exchange compact chain summaries every 1.5 seconds, heartbeat live data
 channels, retire links that remain silent for ninety seconds, and keep retrying
 signalling with backoff. The longer stale-link window tolerates browser timer
 throttling in background tabs without repeatedly replacing a healthy channel.
+Full recovery chains use PeerJS's chunked binary transport so a growing move
+history cannot exceed the smaller single-message JSON channel limit.
 Network, focus, and tab-visibility events also trigger an immediate reconnect
 attempt. A temporary signalling outage therefore pauses reconnection without
 discarding either player's local chain.
