@@ -59,7 +59,7 @@ export interface MeshCallbacks {
 }
 
 const PEER_PREFIX = "crossboard-v5";
-export const CONNECTION_STALE_AFTER_MS = 9_000;
+export const CONNECTION_STALE_AFTER_MS = 90_000;
 export const PEER_OPEN_TIMEOUT_MS = 6_000;
 export const PEER_START_RETRY_DELAYS_MS = [0, 500, 1_200, 2_500, 5_000] as const;
 export const DISCOVERY_RETRY_DELAYS_MS = [0, 400, 1_000, 2_200] as const;
@@ -330,7 +330,10 @@ export class PeerMesh {
     PLAYER_COLORS.slice(0, localIndex).forEach((color) => {
       const peerId = seatPeerId(this.roomCode, color);
       const existing = this.connections.get(peerId);
-      if (existing?.open) {
+      // attach() registers a connection before its data channel opens. Leave
+      // that handshake alone until maintenance retires it; repeatedly dialing
+      // and closing duplicates can prevent the original channel from opening.
+      if (existing) {
         return;
       }
       const connection = this.peer?.connect(peerId, {
