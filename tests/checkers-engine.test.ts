@@ -765,7 +765,7 @@ test("changing a replicated checkers option changes the deterministic hash", () 
   assert.equal(calculateStateHash(changed), changed.stateHash);
 });
 
-test("schema v3 rejects self-hashed partial or invalid team assignments", () => {
+test("schema v4 rejects self-hashed partial or invalid team assignments", () => {
   const initial = createGameState(
     "CHECKERS-FORGED-TEAMS",
     "teams",
@@ -795,7 +795,7 @@ test("schema v3 rejects self-hashed partial or invalid team assignments", () => 
   }
 });
 
-test("schema v3 hashes every replicated checkers and move-history field", () => {
+test("schema v4 hashes every replicated checkers, identity, and history field", () => {
   const opening = position("ffa", {
     "8,3": checker("red", "red"),
     "7,4": checker("blue", "blue"),
@@ -817,6 +817,16 @@ test("schema v3 hashes every replicated checkers and move-history field", () => 
     {
       ...played,
       pendingCapturedSquares: [{ row: 7, col: 4 }],
+    },
+    {
+      ...played,
+      seats: {
+        ...played.seats,
+        red: {
+          ...played.seats.red,
+          playerId: "CB-AAAA-BBBB-CCCC-DDDD",
+        },
+      },
     },
   ];
   for (const color of PLAYER_COLORS) {

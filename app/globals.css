@@ -360,6 +360,49 @@ button:disabled {
   line-height: 1.5;
 }
 
+.identity-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid rgba(59, 140, 97, 0.28);
+  border-radius: 13px;
+  padding: 11px 12px;
+  background: rgba(59, 140, 97, 0.07);
+}
+
+.identity-card > span {
+  min-width: 0;
+}
+
+.identity-card small,
+.identity-card strong {
+  display: block;
+}
+
+.identity-card small {
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.identity-card strong {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono), monospace;
+  font-size: 12px;
+  letter-spacing: 0.025em;
+}
+
+.identity-note {
+  margin: -5px 1px 2px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
 .mini-network {
   position: relative;
   height: 112px;
@@ -906,6 +949,14 @@ button:disabled {
 .health-card strong,
 .preset-button b {
   font-size: 13px;
+}
+
+.health-card small {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
 }
 
 .plain-details {

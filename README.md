@@ -21,8 +21,8 @@ WebRTC; no player's machine needs to remain a permanent host.
 - One-click Teams practice with a computer teammate, or free-for-all practice
   against three computer rivals.
 - PeerJS room discovery and a full browser-to-browser state mesh.
-- Hash-chained snapshots, deterministic fork resolution, local recovery copies,
-  and automatic coordinator election.
+- Timestamped recovery chains on every player's device, deterministic chain
+  merging, persistent seat-recovery codes, and automatic coordinator election.
 - Shared undo that rewinds the latest human decision and any computer replies.
 - Touch/click movement, keyboard-friendly squares, legal-move hints, move
   history, reconnect notices, and mobile legal-move controls.
@@ -61,24 +61,41 @@ immediately.
 ## How rooms stay online
 
 The deployed site serves the app, while PeerJS Cloud performs the initial
-WebRTC handshake. Moves and snapshots then travel directly among the connected
-browsers. Every human has the current position, and the lowest connected human
-seat coordinates lobby controls and computer turns. If that browser leaves, the
-next human seat takes over. Online undo requests also pass through that
-coordinator, which publishes the rewound position to everyone as a new shared
-state.
+WebRTC handshake. Timestamped checkpoints then travel directly among the
+connected browsers. Every human stores a bounded recovery chain, and the lowest
+connected human seat coordinates lobby controls and computer turns. If that
+browser leaves, the next human seat takes over. Online undo requests also pass
+through that coordinator, which publishes the rewound position as another
+checkpoint.
 
-The current room/save protocol is schema v3. Verified schema-v1 and schema-v2
-chess recovery copies migrate locally before joining the v3 peer mesh.
+When a player reconnects, the browser asks every reachable seat for its chain,
+merges all distinct checkpoints, and resumes the position with the latest
+logical timestamp. A readable player code stays in that tab's persistent
+session storage and is also recorded in the local identity registry. Refreshing
+the tab therefore reclaims the same human seat instead of joining as a new
+player. A new tab receives a separate code so two people can still test or play
+from one browser.
 
-The app also saves a recovery copy in each player's browser. If every human
-closes the room, another device cannot resurrect it without a small persistence
-service; that is a deliberate limitation of the serverless first version.
+The current room/save protocol is schema v4 over the v5 peer mesh. Verified
+schema-v1, schema-v2, and schema-v3 recovery states migrate locally before
+joining it.
+
+Peers exchange compact chain summaries every 1.5 seconds, heartbeat live data
+channels, retire silent links after nine seconds, and keep retrying signalling
+with backoff. Network, focus, and tab-visibility events also trigger an
+immediate reconnect attempt. A temporary signalling outage therefore pauses
+reconnection without discarding either player's local chain.
+
+If every human closes the room, a player can reopen the locally saved chain on
+the same browser, but a completely different device cannot resurrect it without
+a small persistence service; that remains a deliberate limitation of the
+serverless version.
 PeerJS's default STUN setup can also fail on some restrictive or symmetric-NAT
 networks. A managed TURN relay is the next production networking upgrade.
 
-Room codes contain 60 bits of randomness. Treat possession of the room code as
-room access in this casual version.
+Room codes contain 60 bits of randomness. Treat possession of a player recovery
+code as control of that player's seat; these codes are convenient bearer
+identifiers, not account authentication.
 
 ## Development
 
@@ -103,6 +120,7 @@ Useful commands:
 Crossboard is published at
 [llucid-97.github.io/crossboard](https://llucid-97.github.io/crossboard/).
 Every push to `main` creates a static Next.js export and deploys it through
-GitHub Pages. Both rules engines, casual minimax computer players, and recovery
-snapshots run in each browser. PeerJS supplies multiplayer discovery and WebRTC
-signalling; the games need no application server or database.
+GitHub Pages. Both rules engines, casual minimax computer players, and
+timestamped recovery chains run in each browser. PeerJS supplies multiplayer
+discovery and WebRTC signalling; the games need no application server or
+database.

@@ -269,7 +269,7 @@ test("one undo rewinds a human chess move and every computer reply", () => {
   assert.equal(shouldAdoptSnapshot(undone, played), false);
 });
 
-test("verified v1 and v2 chess recovery copies migrate to schema v3", () => {
+test("verified v1 and v2 chess recovery copies migrate to schema v4", () => {
   const current = createGameState("TEST-LEGACY", "teams", "Player");
   for (const schemaVersion of [1, 2] as const) {
     const legacy = {
@@ -289,7 +289,7 @@ test("verified v1 and v2 chess recovery copies migrate to schema v3", () => {
 
     const migrated = normalizeGameState(legacy);
     assert.ok(migrated);
-    assert.equal(migrated.schemaVersion, 3);
+    assert.equal(migrated.schemaVersion, 4);
     assert.equal(migrated.gameKind, "chess");
     assert.deepEqual(migrated.undoStack, []);
     assert.deepEqual(migrated.pendingCapturedSquares, []);
@@ -334,7 +334,7 @@ test("a schema-v2 undo frame migrates with explicit checkers continuation fields
 
   const migrated = normalizeGameState(legacy);
   assert.ok(migrated);
-  assert.equal(migrated.schemaVersion, 3);
+  assert.equal(migrated.schemaVersion, 4);
   assert.equal(migrated.undoStack?.length, 1);
   assert.equal(migrated.undoStack?.[0].continuationFrom, null);
   assert.deepEqual(migrated.undoStack?.[0].pendingCapturedSquares, []);
@@ -381,10 +381,12 @@ test("timer guards reject stale state and a coordinator handoff", () => {
 
 test("only the coordinator accepts a current undo request from its human seat", () => {
   const state = createPracticeGame("teams", "Red", "chess");
+  const yellowPlayerId = "CB-AAAA-BBBB-CCCC-DDDD";
   state.seats.yellow = {
     color: "yellow",
     controller: "human",
     name: "Yellow",
+    playerId: yellowPlayerId,
   };
   state.stateHash = calculateStateHash(state);
   const yellowPeerId = seatPeerId(state.roomCode, "yellow");
@@ -395,12 +397,20 @@ test("only the coordinator accepts a current undo request from its human seat", 
       "red",
       ["yellow"],
       yellowPeerId,
+      yellowPlayerId,
       state.stateHash,
     ),
     "yellow",
   );
   assert.equal(
-    undoRequesterFor(state, "red", ["yellow"], yellowPeerId, "stale"),
+    undoRequesterFor(
+      state,
+      "red",
+      ["yellow"],
+      yellowPeerId,
+      yellowPlayerId,
+      "stale",
+    ),
     null,
   );
 });

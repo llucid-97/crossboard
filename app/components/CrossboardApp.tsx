@@ -11,6 +11,7 @@ import Link from "next/link";
 import { chooseComputerMove } from "../game/ai";
 import {
   applyMove,
+  assignPlayerIdentity,
   calculateStateHash,
   createGameState,
   createPracticeGame,
@@ -32,16 +33,32 @@ import {
 } from "../game/engine";
 import { checkersRulesForPreset } from "../game/checkers";
 import {
+  createFreshPlayerIdentity,
+  getOrCreatePlayerIdentity,
+  PlayerIdentity,
+} from "../game/identity";
+import {
   discoverRoom,
   coordinatorOwnsState,
   electCoordinator,
   PeerMesh,
+  playerSeatFor,
   seatPeerId,
-  shouldAdoptSnapshot,
   SignalStatus,
   undoRequesterFor,
   WireMessage,
 } from "../game/network";
+import {
+  appendStateChain,
+  createStateChain,
+  latestStateChainEntry,
+  mergeStateChains,
+  normalizeStateChain,
+  StateChain,
+  stateChainDigest,
+  stateChainMatchesSummary,
+  stateChainSummary,
+} from "../game/replication";
 import {
   configureFriendsVsComputers,
   runLobbyCommand,
@@ -68,7 +85,12 @@ import { GameBoard } from "./GameBoard";
 type View = "home" | "lobby" | "game";
 
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const STORAGE_KEY = "crossboard:last-match";
+const STORAGE_PREFIX = "crossboard:last-match:v2:";
+const LEGACY_STORAGE_KEY = "crossboard:last-match";
+
+function storedMatchKey(playerId: string): string {
+  return `${STORAGE_PREFIX}${playerId}`;
+}
 
 function generateRoomCode(): string {
   const bytes = new Uint8Array(12);
@@ -112,29 +134,66 @@ function displaySeatName(game: GameState, color: PlayerColor): string {
 }
 
 interface StoredMatch {
-  state: GameState;
+  chain: StateChain;
   localColor: PlayerColor;
+  playerId: string;
   savedAt: number;
 }
 
-function readStoredMatch(): StoredMatch | null {
+function readStoredMatch(playerId: string): StoredMatch | null {
   if (typeof window === "undefined") {
     return null;
   }
   try {
-    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
-    const state = normalizeGameState(parsed?.state);
+    const parsed = JSON.parse(
+      localStorage.getItem(storedMatchKey(playerId)) ?? "null",
+    );
+    const chain = normalizeStateChain(parsed?.chain);
     if (
-      state &&
+      chain &&
+      parsed?.playerId === playerId &&
       PLAYER_COLORS.includes(parsed.localColor) &&
       parsed?.savedAt
     ) {
       return {
-        state,
+        chain,
         localColor: parsed.localColor,
+        playerId,
         savedAt: parsed.savedAt,
       } as StoredMatch;
     }
+  } catch {
+    // Try the pre-chain local snapshot below.
+  }
+  try {
+    const legacy = JSON.parse(
+      localStorage.getItem(LEGACY_STORAGE_KEY) ?? "null",
+    );
+    const state = normalizeGameState(legacy?.state);
+    const localColor = legacy?.localColor;
+    if (
+      !state ||
+      !PLAYER_COLORS.includes(localColor) ||
+      state.seats[localColor as PlayerColor].controller !== "human"
+    ) {
+      return null;
+    }
+    const claimed = assignPlayerIdentity(
+      state,
+      localColor as PlayerColor,
+      playerId,
+    );
+    const savedAt = Number.isSafeInteger(legacy?.savedAt)
+      ? legacy.savedAt
+      : Date.now();
+    const stored: StoredMatch = {
+      chain: createStateChain(claimed, playerId, savedAt),
+      localColor,
+      playerId,
+      savedAt,
+    };
+    localStorage.setItem(storedMatchKey(playerId), JSON.stringify(stored));
+    return stored;
   } catch {
     return null;
   }
@@ -274,24 +333,35 @@ export function CrossboardApp() {
   const [notice, setNotice] = useState("");
   const [copied, setCopied] = useState(false);
   const [storedMatch, setStoredMatch] = useState<StoredMatch | null>(null);
+  const [identity, setIdentity] = useState<PlayerIdentity | null>(null);
+  const [chainEntryCount, setChainEntryCount] = useState(0);
+  const [lastChainTime, setLastChainTime] = useState<number | null>(null);
 
   const gameRef = useRef<GameState | null>(null);
+  const chainRef = useRef<StateChain | null>(null);
+  const identityRef = useRef<PlayerIdentity | null>(null);
   const localColorRef = useRef<PlayerColor>("red");
   const meshRef = useRef<PeerMesh | null>(null);
   const connectedRef = useRef<PlayerColor[]>([]);
 
-  const saveSnapshot = useCallback(
-    (state: GameState, color = localColorRef.current) => {
-      if (state.roomCode === "PRACTICE") {
+  const saveChain = useCallback(
+    (chain: StateChain, color = localColorRef.current) => {
+      const activeIdentity = identityRef.current;
+      const latest = latestStateChainEntry(chain);
+      if (!activeIdentity || latest.state.roomCode === "PRACTICE") {
         return;
       }
       try {
         const stored: StoredMatch = {
-          state,
+          chain,
           localColor: color,
-          savedAt: Date.now(),
+          playerId: activeIdentity.id,
+          savedAt: latest.timestamp.wallTime,
         };
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+        localStorage.setItem(
+          storedMatchKey(activeIdentity.id),
+          JSON.stringify(stored),
+        );
         setStoredMatch(stored);
       } catch {
         // The live mesh remains authoritative if local storage is unavailable.
@@ -300,142 +370,214 @@ export function CrossboardApp() {
     [],
   );
 
-  const installState = useCallback(
-    (state: GameState, persist = true) => {
+  const installGameState = useCallback((state: GameState) => {
+    gameRef.current = state;
+    setGame(state);
+  }, []);
+
+  const installChain = useCallback(
+    (chain: StateChain, persist = true) => {
+      const latest = latestStateChainEntry(chain);
+      chainRef.current = chain;
+      setChainEntryCount(chain.entries.length);
+      setLastChainTime(latest.timestamp.wallTime);
+      const state = latest.state;
       gameRef.current = state;
       setGame(state);
       if (persist) {
-        saveSnapshot(state);
+        saveChain(chain);
       }
     },
-    [saveSnapshot],
+    [saveChain],
   );
 
-  const broadcastSnapshot = useCallback((state: GameState) => {
+  const broadcastChain = useCallback((chain: StateChain) => {
     const mesh = meshRef.current;
     if (!mesh) {
       return;
     }
     mesh.broadcast({
-      type: "snapshot",
+      type: "state-chain",
       sender: mesh.localPeerId,
-      state,
+      chain,
     });
   }, []);
 
   const commitState = useCallback(
     (next: GameState, broadcast = true) => {
-      installState(next);
+      if (next.roomCode === "PRACTICE") {
+        installGameState(next);
+        return;
+      }
+      const activeIdentity = identityRef.current;
+      if (!activeIdentity) {
+        return;
+      }
+      const currentChain =
+        chainRef.current ??
+        createStateChain(
+          gameRef.current ?? next,
+          activeIdentity.id,
+        );
+      const nextChain = appendStateChain(
+        currentChain,
+        next,
+        activeIdentity.id,
+      );
+      installChain(nextChain);
       if (broadcast) {
-        broadcastSnapshot(next);
+        broadcastChain(nextChain);
       }
     },
-    [broadcastSnapshot, installState],
+    [broadcastChain, installChain, installGameState],
   );
 
-  const acceptRemoteSnapshot = useCallback(
-    (incoming: GameState) => {
-      const normalized = normalizeGameState(incoming);
+  const acceptRemoteChain = useCallback(
+    (
+      incoming: StateChain,
+    ): { merged: StateChain; incomingDigest: string } | null => {
+      const normalized = normalizeStateChain(incoming);
       if (!normalized) {
-        setNotice("A peer sent an incompatible game copy. It was ignored.");
-        return;
+        setNotice("A peer sent an incompatible recovery chain. It was ignored.");
+        return null;
       }
-      const current = gameRef.current;
-      if (!current) {
-        installState(normalized);
-        setSelectedGame(gameKindOf(normalized));
-        return;
+      const current = chainRef.current;
+      const incomingDigest = stateChainDigest(normalized);
+      const merged = current
+        ? mergeStateChains(current, normalized)
+        : normalized;
+      const previousHead = current
+        ? latestStateChainEntry(current)
+        : null;
+      const nextHead = latestStateChainEntry(merged);
+      const chainChanged =
+        !current || stateChainDigest(current) !== stateChainDigest(merged);
+      if (chainChanged) {
+        installChain(merged);
       }
-      if (normalized.stateHash === current.stateHash) {
-        return;
-      }
-
-      if (shouldAdoptSnapshot(current, normalized)) {
-        const forked =
-          normalized.parentHash !== current.stateHash &&
-          current.parentHash !== normalized.stateHash;
-        if (forked) {
-          setNotice("The room compared two copies and restored one shared position.");
-        }
-        installState(normalized);
-        setSelectedGame(gameKindOf(normalized));
+      if (
+        previousHead &&
+        previousHead.state.stateHash !== nextHead.state.stateHash
+      ) {
+        setNotice(
+          "Recovery chains synchronized. The room restored the newest timestamped position.",
+        );
         setSelected(null);
-        if (normalized.phase !== "lobby") {
-          setView("game");
-        }
       }
+      setSelectedGame(gameKindOf(nextHead.state));
+      if (nextHead.state.phase !== "lobby") {
+        setView("game");
+      }
+      return { merged, incomingDigest };
     },
-    [installState],
+    [installChain],
   );
 
   const startMesh = useCallback(
-    async (state: GameState, color: PlayerColor): Promise<PeerMesh> => {
-      const mesh = new PeerMesh(state.roomCode, color, {
-        onMessage: (message: WireMessage, remotePeerId: string) => {
-          if (message.type === "state-request") {
-            const current = gameRef.current;
-            if (current) {
-              mesh.sendTo(remotePeerId, {
-                type: "snapshot",
-                sender: mesh.localPeerId,
-                state: current,
-              });
-            }
-            return;
-          }
-          if (message.type === "undo-request") {
-            const current = gameRef.current;
-            const requester = current
-              ? undoRequesterFor(
-                  current,
-                  localColorRef.current,
-                  connectedRef.current,
-                  remotePeerId,
-                  message.stateHash,
-                )
-              : null;
-            if (!current || !requester) {
+    async (chain: StateChain, color: PlayerColor): Promise<PeerMesh> => {
+      const activeIdentity = identityRef.current;
+      if (!activeIdentity) {
+        throw new Error("Player identity is not ready");
+      }
+      const state = latestStateChainEntry(chain).state;
+      const mesh = new PeerMesh(
+        state.roomCode,
+        color,
+        activeIdentity.id,
+        {
+          onMessage: (message: WireMessage, remotePeerId: string) => {
+            if (message.type === "state-request") {
+              const current = chainRef.current;
+              if (current) {
+                mesh.sendTo(remotePeerId, {
+                  type: "state-chain",
+                  sender: mesh.localPeerId,
+                  chain: current,
+                });
+              }
               return;
             }
-            const next = undoLastTurn(current);
-            if (next !== current) {
-              commitState(next);
-              setSelected(null);
-              setView("game");
+            if (message.type === "undo-request") {
+              const current = gameRef.current;
+              const requester = current
+                ? undoRequesterFor(
+                    current,
+                    localColorRef.current,
+                    connectedRef.current,
+                    remotePeerId,
+                    message.playerId,
+                    message.stateHash,
+                  )
+                : null;
+              if (!current || !requester) {
+                return;
+              }
+              const next = undoLastTurn(current);
+              if (next !== current) {
+                commitState(next);
+                setSelected(null);
+                setView("game");
+                setNotice(
+                  `${current.seats[requester].name} rewound the last turn.`,
+                );
+              }
+              return;
+            }
+            if (message.type === "chain-summary") {
+              const current = chainRef.current;
+              if (current && !stateChainMatchesSummary(current, message)) {
+                mesh.sendTo(remotePeerId, {
+                  type: "state-chain",
+                  sender: mesh.localPeerId,
+                  chain: current,
+                });
+              }
+              return;
+            }
+            if (message.type === "state-chain") {
+              const result = acceptRemoteChain(message.chain);
+              if (
+                result &&
+                stateChainDigest(result.merged) !== result.incomingDigest
+              ) {
+                mesh.sendTo(remotePeerId, {
+                  type: "state-chain",
+                  sender: mesh.localPeerId,
+                  chain: result.merged,
+                });
+              }
+            }
+          },
+          onConnections: (colors) => {
+            const previous = connectedRef.current;
+            connectedRef.current = colors;
+            setConnectedColors(colors);
+            if (
+              previous.length > colors.length &&
+              gameRef.current?.phase !== "finished"
+            ) {
               setNotice(
-                `${current.seats[requester].name} rewound the last turn.`,
+                "A player disconnected. The room state is saved and reconnection will keep retrying.",
               );
             }
-            return;
-          }
-          if (message.type === "snapshot") {
-            acceptRemoteSnapshot(message.state);
-          }
+          },
+          onSignalStatus: setSignalStatus,
+          onNotice: setNotice,
         },
-        onConnections: (colors) => {
-          const previous = connectedRef.current;
-          connectedRef.current = colors;
-          setConnectedColors(colors);
-          if (
-            previous.length > colors.length &&
-            gameRef.current?.phase !== "finished"
-          ) {
-            setNotice("A player disconnected. The room has chosen a new coordinator.");
-          }
-        },
-        onSignalStatus: setSignalStatus,
-        onNotice: setNotice,
-      });
+      );
       meshRef.current = mesh;
       await mesh.start();
       return mesh;
     },
-    [acceptRemoteSnapshot, commitState],
+    [acceptRemoteChain, commitState],
   );
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      setStoredMatch(readStoredMatch());
+      const activeIdentity = getOrCreatePlayerIdentity();
+      identityRef.current = activeIdentity;
+      setIdentity(activeIdentity);
+      setStoredMatch(readStoredMatch(activeIdentity.id));
       const storedName = localStorage.getItem("crossboard:player-name");
       if (storedName) {
         setPlayerName(storedName);
@@ -451,6 +593,51 @@ export function CrossboardApp() {
   useEffect(() => {
     return () => meshRef.current?.close();
   }, []);
+
+  useEffect(() => {
+    if (!isNetworked) {
+      return;
+    }
+    const shareSummary = () => {
+      const mesh = meshRef.current;
+      const chain = chainRef.current;
+      if (!mesh || !chain) {
+        return;
+      }
+      const summary = stateChainSummary(chain);
+      mesh.broadcast({
+        type: "chain-summary",
+        sender: mesh.localPeerId,
+        ...summary,
+      });
+    };
+    shareSummary();
+    const timer = window.setInterval(shareSummary, 1_500);
+    return () => window.clearInterval(timer);
+  }, [isNetworked]);
+
+  useEffect(() => {
+    if (!isNetworked) {
+      return;
+    }
+    const reconnect = () => meshRef.current?.reconnectNow();
+    const reconnectWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        reconnect();
+      }
+    };
+    window.addEventListener("online", reconnect);
+    window.addEventListener("focus", reconnect);
+    document.addEventListener("visibilitychange", reconnectWhenVisible);
+    return () => {
+      window.removeEventListener("online", reconnect);
+      window.removeEventListener("focus", reconnect);
+      document.removeEventListener(
+        "visibilitychange",
+        reconnectWhenVisible,
+      );
+    };
+  }, [isNetworked]);
 
   useEffect(() => {
     if (!notice) {
@@ -560,7 +747,23 @@ export function CrossboardApp() {
     window.history.replaceState({}, "", url);
   };
 
+  const useFreshIdentity = () => {
+    if (view !== "home") {
+      return;
+    }
+    const freshIdentity = createFreshPlayerIdentity();
+    identityRef.current = freshIdentity;
+    setIdentity(freshIdentity);
+    setStoredMatch(readStoredMatch(freshIdentity.id));
+    setNotice("This tab now has a new recovery code.");
+  };
+
   const createOnlineRoom = async (kind: GameKind = selectedGame) => {
+    const activeIdentity = identityRef.current;
+    if (!activeIdentity) {
+      setNotice("Your player code is still loading.");
+      return;
+    }
     localStorage.setItem("crossboard:player-name", playerName.trim() || "Player");
     const roomCode = generateRoomCode();
     const initial = createGameState(
@@ -568,28 +771,37 @@ export function CrossboardApp() {
       "teams",
       playerName.trim() || "Player",
       kind,
+      activeIdentity.id,
     );
     initial.seats.red.peerId = seatPeerId(roomCode, "red");
     initial.stateHash = calculateStateHash(initial);
+    const chain = createStateChain(initial, activeIdentity.id);
 
     localColorRef.current = "red";
     setLocalColor("red");
     setOrientation("red");
     setSelectedGame(kind);
-    installState(initial);
+    installChain(chain);
     setView("lobby");
     setIsNetworked(true);
     updateLocation(roomCode);
     try {
-      await startMesh(initial, "red");
+      await startMesh(chain, "red");
       setNotice("Room ready. Share the code when you’re happy with the seats.");
     } catch {
+      meshRef.current?.close();
+      meshRef.current = null;
       setSignalStatus("offline");
       setNotice("The peer handshake is unavailable. Local practice still works.");
     }
   };
 
   const joinRoom = async () => {
+    const activeIdentity = identityRef.current;
+    if (!activeIdentity) {
+      setNotice("Your player code is still loading.");
+      return;
+    }
     const roomCode = normalizeRoomCode(roomInput);
     if (roomCode.replace(/-/g, "").length !== 12) {
       setNotice("Enter the 12-character room code.");
@@ -598,46 +810,86 @@ export function CrossboardApp() {
     setJoining(true);
     setNotice("Looking for the room…");
     try {
-      const discovered = normalizeGameState(await discoverRoom(roomCode));
+      const discovered = normalizeStateChain(
+        await discoverRoom(roomCode, activeIdentity.id),
+      );
       if (!discovered) {
         throw new Error("Incompatible room");
       }
-      if (discovered.phase !== "lobby") {
+      const localCopy =
+        storedMatch?.playerId === activeIdentity.id &&
+        storedMatch.chain.roomCode === discovered.roomCode
+          ? storedMatch.chain
+          : null;
+      const synchronized = localCopy
+        ? mergeStateChains(discovered, localCopy)
+        : discovered;
+      const synchronizedState = latestStateChainEntry(synchronized).state;
+      const reclaimedColor = playerSeatFor(
+        synchronizedState,
+        activeIdentity.id,
+      );
+      if (!reclaimedColor && synchronizedState.phase !== "lobby") {
         throw new Error("That game has already started.");
       }
-      const candidates = (
-        ["yellow", "blue", "green", "red"] as PlayerColor[]
-      ).filter((color) => discovered.seats[color].controller === "open");
+      const candidates = reclaimedColor
+        ? [reclaimedColor]
+        : (["yellow", "blue", "green", "red"] as PlayerColor[]).filter(
+            (color) =>
+              synchronizedState.seats[color].controller === "open",
+          );
       if (!candidates.length) {
         throw new Error("That room has no open seats.");
       }
 
       let joined = false;
       for (const color of candidates) {
-        const seats = {
-          ...discovered.seats,
-          [color]: {
-            color,
-            controller: "human" as const,
-            name: playerName.trim() || COLOR_LABELS[color],
-            peerId: seatPeerId(roomCode, color),
-          },
-        };
-        const next = updateLobby(discovered, { seats }, `join-${color}`);
+        const rejoining =
+          synchronizedState.seats[color].playerId === activeIdentity.id;
+        const next = rejoining
+          ? synchronizedState
+          : updateLobby(
+              synchronizedState,
+              {
+                seats: {
+                  ...synchronizedState.seats,
+                  [color]: {
+                    color,
+                    controller: "human" as const,
+                    name: playerName.trim() || COLOR_LABELS[color],
+                    peerId: seatPeerId(roomCode, color),
+                    playerId: activeIdentity.id,
+                  },
+                },
+              },
+              `join-${color}`,
+            );
+        const nextChain = rejoining
+          ? synchronized
+          : appendStateChain(
+              synchronized,
+              next,
+              activeIdentity.id,
+            );
         gameRef.current = next;
+        chainRef.current = nextChain;
         localColorRef.current = color;
         try {
-          const mesh = await startMesh(next, color);
+          const mesh = await startMesh(nextChain, color);
           meshRef.current = mesh;
           setLocalColor(color);
           setOrientation(color);
           setSelectedGame(gameKindOf(next));
           setIsNetworked(true);
-          installState(next);
-          setView("lobby");
+          installChain(nextChain);
+          setView(next.phase === "lobby" ? "lobby" : "game");
           updateLocation(roomCode);
-          broadcastSnapshot(next);
-          setNotice(`Joined as ${COLOR_LABELS[color]}.`);
+          broadcastChain(nextChain);
+          setNotice(
+            rejoining
+              ? `Welcome back. Your ${COLOR_LABELS[color]} seat and recovery chain are restored.`
+              : `Joined as ${COLOR_LABELS[color]}.`,
+          );
           joined = true;
           break;
         } catch {
@@ -670,6 +922,9 @@ export function CrossboardApp() {
     );
     meshRef.current?.close();
     meshRef.current = null;
+    chainRef.current = null;
+    setChainEntryCount(0);
+    setLastChainTime(null);
     localColorRef.current = "red";
     setLocalColor("red");
     setOrientation("red");
@@ -677,7 +932,7 @@ export function CrossboardApp() {
     setIsNetworked(false);
     setSignalStatus("online");
     setConnectedColors([]);
-    installState(
+    installGameState(
       kind === "checkers"
         ? updateLobby(
             createGameState(
@@ -690,7 +945,6 @@ export function CrossboardApp() {
             `practice-${kind}-${mode}`,
           )
         : started,
-      false,
     );
     setView(kind === "checkers" ? "lobby" : "game");
     if (kind === "checkers") {
@@ -700,23 +954,55 @@ export function CrossboardApp() {
   };
 
   const resumeStoredMatch = async () => {
-    if (!storedMatch) {
+    const activeIdentity = identityRef.current;
+    if (!storedMatch || !activeIdentity) {
       return;
     }
-    const { state, localColor: storedColor } = storedMatch;
-    localColorRef.current = storedColor;
-    setLocalColor(storedColor);
-    setOrientation(storedColor);
+    let synchronizedChain = storedMatch.chain;
+    setNotice("Checking every available recovery chain…");
+    try {
+      const remoteChain = normalizeStateChain(
+        await discoverRoom(
+          synchronizedChain.roomCode,
+          activeIdentity.id,
+          2_500,
+        ),
+      );
+      if (remoteChain) {
+        synchronizedChain = mergeStateChains(
+          synchronizedChain,
+          remoteChain,
+        );
+      }
+    } catch {
+      // A lone returning player can still restore the locally saved chain.
+    }
+    const state = latestStateChainEntry(synchronizedChain).state;
+    const recoveredColor = playerSeatFor(state, activeIdentity.id);
+    if (!recoveredColor) {
+      setNotice("That saved seat belongs to a different player code.");
+      return;
+    }
+    localColorRef.current = recoveredColor;
+    setLocalColor(recoveredColor);
+    setOrientation(recoveredColor);
     setSelectedGame(gameKindOf(state));
-    installState(state);
+    installChain(synchronizedChain);
     setView(state.phase === "lobby" ? "lobby" : "game");
     setIsNetworked(true);
     updateLocation(state.roomCode);
     try {
-      await startMesh(state, storedColor);
-      setNotice("Your local copy is live and comparing notes with the room.");
+      await startMesh(synchronizedChain, recoveredColor);
+      broadcastChain(synchronizedChain);
+      setNotice(
+        `Welcome back. Your ${COLOR_LABELS[recoveredColor]} seat and newest recovery checkpoint are restored.`,
+      );
     } catch {
-      setNotice("That seat is still active elsewhere. Close the other tab and retry.");
+      meshRef.current?.close();
+      meshRef.current = null;
+      setNotice(
+        "That seat is still active elsewhere. Close the other tab and retry.",
+      );
     }
   };
 
@@ -724,9 +1010,12 @@ export function CrossboardApp() {
     meshRef.current?.close();
     meshRef.current = null;
     gameRef.current = null;
+    chainRef.current = null;
     connectedRef.current = [];
     setConnectedColors([]);
     setGame(null);
+    setChainEntryCount(0);
+    setLastChainTime(null);
     setSelected(null);
     setIsNetworked(false);
     setView("home");
@@ -1014,6 +1303,7 @@ export function CrossboardApp() {
       mesh.sendTo(seatPeerId(current.roomCode, currentCoordinator), {
         type: "undo-request",
         sender: mesh.localPeerId,
+        playerId: mesh.playerId,
         stateHash: current.stateHash,
       });
       setNotice("Rewinding the shared turn…");
@@ -1065,6 +1355,16 @@ export function CrossboardApp() {
           ? "All connected"
           : "Room live"
         : `${humanCount - connectedHumanCount} reconnecting`;
+  const storedState = storedMatch
+    ? latestStateChainEntry(storedMatch.chain).state
+    : null;
+  const lastChainLabel = lastChainTime
+    ? new Date(lastChainTime).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      })
+    : null;
 
   if (view === "home") {
     return (
@@ -1134,6 +1434,7 @@ export function CrossboardApp() {
               <button
                 className="primary-button"
                 type="button"
+                disabled={!identity}
                 onClick={() => void createOnlineRoom(selectedGame)}
               >
                 Create {selectedGame === "chess" ? "chess" : "checkers"} room{" "}
@@ -1197,6 +1498,26 @@ export function CrossboardApp() {
               maxLength={24}
               onChange={(event) => setPlayerName(event.target.value)}
             />
+            <div className="identity-card" data-testid="player-identity">
+              <span>
+                <small>Your refresh recovery code</small>
+                <strong data-testid="player-id">
+                  {identity?.id ?? "Creating code…"}
+                </strong>
+              </span>
+              <button
+                className="text-button"
+                type="button"
+                disabled={!identity}
+                onClick={useFreshIdentity}
+              >
+                New code
+              </button>
+            </div>
+            <p className="identity-note">
+              This tab remembers the code after a refresh, so an active game
+              can return you to the same seat.
+            </p>
             <label htmlFor="room-code">Room code</label>
             <div className="join-row">
               <input
@@ -1217,15 +1538,15 @@ export function CrossboardApp() {
               <button
                 className="join-button"
                 type="button"
-                disabled={joining}
+                disabled={joining || !identity}
                 onClick={() => void joinRoom()}
               >
                 {joining ? "Finding…" : "Join"}
               </button>
             </div>
             <p className="panel-note">
-              Invite links carry the room and its game. The match continues
-              while one human keeps a copy open.
+              Invite links carry the room and its game. Every player keeps a
+              timestamped recovery chain and shares it again after reconnecting.
             </p>
             <div className="mini-network" aria-hidden="true">
               <span className="network-node node-red">●</span>
@@ -1236,7 +1557,7 @@ export function CrossboardApp() {
               <span className="network-line line-three" />
               <span className="network-node node-green">■</span>
             </div>
-            {storedMatch ? (
+            {storedMatch && storedState ? (
               <button
                 className="resume-card"
                 type="button"
@@ -1245,8 +1566,9 @@ export function CrossboardApp() {
                 <span>
                   <b>Resume local copy</b>
                   <small>
-                    Room {storedMatch.state.roomCode} · move{" "}
-                    {storedMatch.state.history.length}
+                    Room {storedState.roomCode} ·{" "}
+                    {storedMatch.chain.entries.length} checkpoints · move{" "}
+                    {storedState.history.length}
                   </small>
                 </span>
                 <span aria-hidden="true">↗</span>
@@ -1273,8 +1595,9 @@ export function CrossboardApp() {
             <span>⟲</span>
             <h2>No fragile host</h2>
             <p>
-              Every browser holds the latest position. Another connected player
-              takes over coordination automatically.
+              Every browser stores a timestamped position chain. Reconnecting
+              players merge their copies, restore the newest checkpoint, and
+              reclaim their original seat.
             </p>
           </article>
           <article>
@@ -1565,15 +1888,25 @@ export function CrossboardApp() {
                       : `${game.seats[coordinator].name} is coordinating`
                     : "Computers run in this browser"}
                 </strong>
+                {isNetworked ? (
+                  <small>
+                    {chainEntryCount} timestamped checkpoints
+                    {lastChainLabel ? ` · newest ${lastChainLabel}` : ""}
+                  </small>
+                ) : null}
               </div>
             </div>
             {isNetworked ? (
               <details className="plain-details">
                 <summary>How this room stays open</summary>
                 <p>
-                  Everyone keeps the current game. If the coordinator
-                  disconnects, another connected human takes over. Rejoining
-                  players catch up from the others.
+                  Everyone stores the room’s timestamped recovery chain. If the
+                  coordinator disconnects, another connected human takes over.
+                  Rejoining players merge every available copy, restore the
+                  newest checkpoint, and reclaim their seat with their player
+                  code. Silent links are retired automatically, and every
+                  browser keeps retrying in the background when the network
+                  returns.
                 </p>
               </details>
             ) : null}
@@ -1684,7 +2017,9 @@ export function CrossboardApp() {
           </div>
         </div>
         {isNetworked && coordinator === localColor ? (
-          <span className="coordinator-note">You’re keeping turns in sync</span>
+          <span className="coordinator-note">
+            You’re keeping {chainEntryCount} checkpoints in sync
+          </span>
         ) : null}
       </section>
 
@@ -1884,6 +2219,12 @@ export function CrossboardApp() {
             <p className="hash-line">
               Shared copy <code>{game.stateHash.slice(0, 8)}</code>
             </p>
+            {isNetworked ? (
+              <p className="hash-line" data-testid="recovery-chain-status">
+                Recovery chain <b>{chainEntryCount}</b>
+                {lastChainLabel ? ` · newest ${lastChainLabel}` : ""}
+              </p>
+            ) : null}
           </section>
 
           {isCheckers ? (

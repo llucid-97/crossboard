@@ -12,12 +12,14 @@ import {
   MoveRecord,
   Piece,
   PieceType,
+  PlayerId,
   PlayerColor,
   PLAYER_COLORS,
   SeatMap,
   TeamAssignments,
   TEAM_LABELS,
   UndoFrame,
+  isPlayerId,
 } from "./types";
 import {
   areAllies,
@@ -136,9 +138,17 @@ export function createInitialBoard(): BoardState {
   return board;
 }
 
-export function createSeats(localName = "You"): SeatMap {
+export function createSeats(
+  localName = "You",
+  localPlayerId?: PlayerId,
+): SeatMap {
   return {
-    red: { color: "red", controller: "human", name: localName },
+    red: {
+      color: "red",
+      controller: "human",
+      name: localName,
+      playerId: localPlayerId,
+    },
     blue: { color: "blue", controller: "computer", name: "Computer Blue" },
     yellow: { color: "yellow", controller: "open", name: "Open seat" },
     green: { color: "green", controller: "computer", name: "Computer Green" },
@@ -150,9 +160,10 @@ export function createGameState(
   mode: GameMode = "teams",
   localName = "You",
   gameKind: GameKind = "chess",
+  localPlayerId?: PlayerId,
 ): GameState {
   const state: GameState = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     ruleset:
       gameKind === "checkers"
         ? "crossboard-checkers-v1"
@@ -164,7 +175,7 @@ export function createGameState(
     checkersRules: { ...DEFAULT_CHECKERS_RULES },
     phase: "lobby",
     board: {},
-    seats: createSeats(localName),
+    seats: createSeats(localName, localPlayerId),
     turn: "red",
     revision: 0,
     round: 1,
@@ -850,6 +861,36 @@ export function updateLobby(
   });
 }
 
+export function assignPlayerIdentity(
+  state: GameState,
+  color: PlayerColor,
+  playerId: PlayerId,
+): GameState {
+  const seat = state.seats[color];
+  if (
+    seat.controller !== "human" ||
+    (seat.playerId !== undefined && seat.playerId !== playerId)
+  ) {
+    return state;
+  }
+  if (seat.playerId === playerId) {
+    return state;
+  }
+  const revision = state.revision + 1;
+  return stampState(state, {
+    ...state,
+    seats: {
+      ...state.seats,
+      [color]: {
+        ...seat,
+        playerId,
+      },
+    },
+    revision,
+    lastActionId: `claim-${color}-${revision}`,
+  });
+}
+
 export function createPracticeGame(
   mode: GameMode,
   localName = "You",
@@ -973,7 +1014,15 @@ function stableStatePayload(state: GameState): string {
   const board = stableBoardPayload(state.board);
   const seats = PLAYER_COLORS.map((color) => {
     const seat = state.seats[color];
-    return [color, seat.controller, seat.name, seat.peerId ?? ""];
+    const legacyFields = [
+      color,
+      seat.controller,
+      seat.name,
+      seat.peerId ?? "",
+    ];
+    return schemaVersion >= 4
+      ? [...legacyFields, seat.playerId ?? ""]
+      : legacyFields;
   });
   const history = state.history.map((move) => {
     return [
@@ -1086,6 +1135,58 @@ function hasCurrentTeamAssignments(
   );
 }
 
+function hasCurrentSeats(value: unknown): value is SeatMap {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const seats = value as Record<string, unknown>;
+  return PLAYER_COLORS.every((color) => {
+    const value = seats[color];
+    if (!value || typeof value !== "object") {
+      return false;
+    }
+    const seat = value as Record<string, unknown>;
+    return (
+      seat.color === color &&
+      (seat.controller === "human" ||
+        seat.controller === "open" ||
+        seat.controller === "computer") &&
+      typeof seat.name === "string" &&
+      (seat.peerId === undefined || typeof seat.peerId === "string") &&
+      (seat.playerId === undefined || isPlayerId(seat.playerId))
+    );
+  });
+}
+
+function hasModernStateShape(
+  candidate: Record<string, unknown>,
+): boolean {
+  return !(
+    (candidate.gameKind !== "chess" &&
+      candidate.gameKind !== "checkers") ||
+    (candidate.ruleset !== "crossboard-capture-v1" &&
+      candidate.ruleset !== "crossboard-checkers-v1") ||
+    (candidate.gameKind === "chess" &&
+      candidate.ruleset !== "crossboard-capture-v1") ||
+    (candidate.gameKind === "checkers" &&
+      candidate.ruleset !== "crossboard-checkers-v1") ||
+    !hasCurrentSeats(candidate.seats) ||
+    !hasCurrentTeamAssignments(candidate.teamAssignments) ||
+    !hasCurrentCheckersRules(candidate.checkersRules) ||
+    !Array.isArray(candidate.pendingCapturedSquares) ||
+    !Array.isArray(candidate.undoStack) ||
+    !(candidate.undoStack as unknown[]).every(
+      (frame) =>
+        !!frame &&
+        typeof frame === "object" &&
+        Array.isArray(
+          (frame as { pendingCapturedSquares?: unknown })
+            .pendingCapturedSquares,
+        ),
+    )
+  );
+}
+
 export function normalizeGameState(value: unknown): GameState | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -1094,35 +1195,13 @@ export function normalizeGameState(value: unknown): GameState | null {
   const schemaVersion = candidate.schemaVersion;
   if (
     typeof schemaVersion !== "number" ||
-    ![1, 2, 3].includes(schemaVersion)
+    ![1, 2, 3, 4].includes(schemaVersion)
   ) {
     return null;
   }
 
-  if (schemaVersion === 3) {
-    if (
-      (candidate.gameKind !== "chess" &&
-        candidate.gameKind !== "checkers") ||
-      (candidate.ruleset !== "crossboard-capture-v1" &&
-        candidate.ruleset !== "crossboard-checkers-v1") ||
-      (candidate.gameKind === "chess" &&
-        candidate.ruleset !== "crossboard-capture-v1") ||
-      (candidate.gameKind === "checkers" &&
-        candidate.ruleset !== "crossboard-checkers-v1") ||
-      !hasCurrentTeamAssignments(candidate.teamAssignments) ||
-      !hasCurrentCheckersRules(candidate.checkersRules) ||
-      !Array.isArray(candidate.pendingCapturedSquares) ||
-      !Array.isArray(candidate.undoStack) ||
-      !(candidate.undoStack as unknown[]).every(
-        (frame) =>
-          !!frame &&
-          typeof frame === "object" &&
-          Array.isArray(
-            (frame as { pendingCapturedSquares?: unknown })
-              .pendingCapturedSquares,
-          ),
-      )
-    ) {
+  if (schemaVersion === 4) {
+    if (!hasModernStateShape(candidate)) {
       return null;
     }
     const current = candidate as unknown as GameState;
@@ -1133,6 +1212,43 @@ export function normalizeGameState(value: unknown): GameState | null {
     } catch {
       return null;
     }
+  }
+
+  if (schemaVersion === 3) {
+    if (!hasModernStateShape(candidate)) {
+      return null;
+    }
+    const legacy = candidate as unknown as GameState;
+    try {
+      if (calculateStateHash(legacy) !== legacy.stateHash) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+    const revision = legacy.revision + 1;
+    const seats = Object.fromEntries(
+      PLAYER_COLORS.map((color) => {
+        const seat = legacy.seats[color];
+        return [
+          color,
+          {
+            color,
+            controller: seat.controller,
+            name: seat.name,
+            peerId: seat.peerId,
+          },
+        ];
+      }),
+    ) as SeatMap;
+    const migrated: GameState = {
+      ...legacy,
+      schemaVersion: 4,
+      seats,
+      revision,
+      lastActionId: `upgrade-v3-to-v4-${revision}`,
+    };
+    return stampState(legacy, migrated);
   }
 
   if (
@@ -1161,7 +1277,7 @@ export function normalizeGameState(value: unknown): GameState | null {
   const revision = legacy.revision + 1;
   const migrated: GameState = {
     ...legacy,
-    schemaVersion: 3,
+    schemaVersion: 4,
     ruleset: "crossboard-capture-v1",
     gameKind: "chess",
     teamAssignments: { ...DEFAULT_TEAM_ASSIGNMENTS },
@@ -1170,7 +1286,7 @@ export function normalizeGameState(value: unknown): GameState | null {
     pendingCapturedSquares: [],
     undoStack,
     revision,
-    lastActionId: `upgrade-v${schemaVersion}-to-v3-${revision}`,
+    lastActionId: `upgrade-v${schemaVersion}-to-v4-${revision}`,
   };
   return stampState(legacy, migrated);
 }
