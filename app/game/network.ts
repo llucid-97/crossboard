@@ -208,7 +208,10 @@ export class PeerMesh {
 
       peer.on("connection", (connection) => {
         if (this.peer === peer && !this.closed) {
-          this.attach(connection);
+          // A fresh incoming channel from the same stable seat ID means that
+          // browser has restarted. Prefer it over a half-open pre-refresh
+          // channel so seat recovery does not wait for the stale timeout.
+          this.attach(connection, true);
         } else {
           connection.close();
         }
@@ -220,6 +223,7 @@ export class PeerMesh {
         }
         this.callbacks.onSignalStatus("online");
         this.ensureMaintenance();
+        this.connectToEverySeatOnce();
         this.maintainConnectivity();
         if (!settled) {
           settled = true;
@@ -328,37 +332,58 @@ export class PeerMesh {
     }
     const localIndex = PLAYER_COLORS.indexOf(this.localColor);
     PLAYER_COLORS.slice(0, localIndex).forEach((color) => {
-      const peerId = seatPeerId(this.roomCode, color);
-      const existing = this.connections.get(peerId);
-      // attach() registers a connection before its data channel opens. Leave
-      // that handshake alone until maintenance retires it; repeatedly dialing
-      // and closing duplicates can prevent the original channel from opening.
-      if (existing) {
-        return;
-      }
-      const connection = this.peer?.connect(peerId, {
-        label: "crossboard-state",
-        metadata: {
-          room: cleanRoomCode(this.roomCode),
-          color: this.localColor,
-          playerId: this.playerId,
-          role: "player",
-        },
-        // Recovery chains quickly exceed PeerJS's unchunked JSON-channel
-        // message limit. Binary connections chunk large checkpoints instead.
-        serialization: "binary",
-      });
-      if (connection) {
-        this.attach(connection);
-      }
+      this.connectToSeat(color);
     });
   }
 
-  private attach(connection: DataConnection): void {
+  private connectToEverySeatOnce(): void {
+    PLAYER_COLORS.filter((color) => color !== this.localColor).forEach(
+      (color) => this.connectToSeat(color),
+    );
+  }
+
+  private connectToSeat(color: PlayerColor): void {
+    if (!this.peer?.open || color === this.localColor) {
+      return;
+    }
+    const peerId = seatPeerId(this.roomCode, color);
+    const existing = this.connections.get(peerId);
+    // attach() registers a connection before its data channel opens. Leave
+    // that handshake alone until maintenance retires it; repeatedly dialing
+    // and closing duplicates can prevent the original channel from opening.
+    if (existing) {
+      return;
+    }
+    const connection = this.peer.connect(peerId, {
+      label: "crossboard-state",
+      metadata: {
+        room: cleanRoomCode(this.roomCode),
+        color: this.localColor,
+        playerId: this.playerId,
+        role: "player",
+      },
+      // Recovery chains quickly exceed PeerJS's unchunked JSON-channel
+      // message limit. Binary connections chunk large checkpoints instead.
+      serialization: "binary",
+    });
+    this.attach(connection);
+  }
+
+  private attach(
+    connection: DataConnection,
+    replaceExisting = false,
+  ): void {
     const current = this.connections.get(connection.peer);
     if (current && current !== connection) {
-      connection.close();
-      return;
+      if (!replaceExisting) {
+        connection.close();
+        return;
+      }
+      current.close();
+      if (this.connections.get(connection.peer) === current) {
+        this.connections.delete(connection.peer);
+        this.lastSeenAt.delete(connection.peer);
+      }
     }
     this.connections.set(connection.peer, connection);
     this.lastSeenAt.set(connection.peer, Date.now());

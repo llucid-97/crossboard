@@ -78,6 +78,8 @@ test("removes the disposable starter and records production metadata", async () 
   assert.match(appSource, /reconnectNow/);
   assert.match(networkSource, /serialization: "binary"/);
   assert.doesNotMatch(networkSource, /serialization: "json"/);
+  assert.match(networkSource, /connectToEverySeatOnce/);
+  assert.match(networkSource, /this\.attach\(connection, true\)/);
   assert.match(replicationSource, /mergeStateChains/);
   assert.match(replicationSource, /MAX_STATE_CHAIN_ENTRIES = 48/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
