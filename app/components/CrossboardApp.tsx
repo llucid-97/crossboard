@@ -56,6 +56,8 @@ import {
   normalizeStateChain,
   StateChain,
   stateChainDigest,
+  stateChainMatchesSummary,
+  stateChainSummary,
 } from "../game/replication";
 import {
   configureFriendsVsComputers,
@@ -521,6 +523,17 @@ export function CrossboardApp() {
               }
               return;
             }
+            if (message.type === "chain-summary") {
+              const current = chainRef.current;
+              if (current && !stateChainMatchesSummary(current, message)) {
+                mesh.sendTo(remotePeerId, {
+                  type: "state-chain",
+                  sender: mesh.localPeerId,
+                  chain: current,
+                });
+              }
+              return;
+            }
             if (message.type === "state-chain") {
               const result = acceptRemoteChain(message.chain);
               if (
@@ -580,6 +593,28 @@ export function CrossboardApp() {
   useEffect(() => {
     return () => meshRef.current?.close();
   }, []);
+
+  useEffect(() => {
+    if (!isNetworked) {
+      return;
+    }
+    const shareSummary = () => {
+      const mesh = meshRef.current;
+      const chain = chainRef.current;
+      if (!mesh || !chain) {
+        return;
+      }
+      const summary = stateChainSummary(chain);
+      mesh.broadcast({
+        type: "chain-summary",
+        sender: mesh.localPeerId,
+        ...summary,
+      });
+    };
+    shareSummary();
+    const timer = window.setInterval(shareSummary, 1_500);
+    return () => window.clearInterval(timer);
+  }, [isNetworked]);
 
   useEffect(() => {
     if (!notice) {

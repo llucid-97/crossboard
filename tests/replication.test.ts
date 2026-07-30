@@ -17,6 +17,9 @@ import {
   MAX_STATE_CHAIN_ENTRIES,
   mergeStateChains,
   normalizeStateChain,
+  stateChainDigest,
+  stateChainMatchesSummary,
+  stateChainSummary,
 } from "../app/game/replication";
 import { GameState } from "../app/game/types";
 
@@ -118,6 +121,36 @@ test("merging the same checkpoint never gives it a newer timestamp", () => {
   assert.equal(merged.entries.length, 1);
   assert.equal(merged.entries[0].timestamp.wallTime, 1_000);
   assert.equal(merged.entries[0].timestamp.playerId, RED_ID);
+});
+
+test("compact summaries detect a peer that missed later checkpoints", () => {
+  const initial = createGameState(
+    "CHAIN-ANTI-ENTROPY",
+    "teams",
+    "Red",
+    "chess",
+    RED_ID,
+  );
+  const moveTwoChain = createStateChain(initial, RED_ID, 1_000);
+  const later = updateLobby(initial, { mode: "ffa" }, "later-checkpoint");
+  const moveFourChain = appendStateChain(
+    moveTwoChain,
+    later,
+    YELLOW_ID,
+    1_100,
+  );
+  const latestSummary = stateChainSummary(moveFourChain);
+
+  assert.equal(stateChainDigest(moveFourChain).length, 16);
+  assert.equal(stateChainMatchesSummary(moveFourChain, latestSummary), true);
+  assert.equal(stateChainMatchesSummary(moveTwoChain, latestSummary), false);
+  assert.equal(
+    stateChainMatchesSummary(
+      moveTwoChain,
+      stateChainSummary(moveTwoChain),
+    ),
+    true,
+  );
 });
 
 test("recovery chains reject a state whose signed fields were changed", () => {

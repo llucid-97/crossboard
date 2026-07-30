@@ -21,6 +21,12 @@ export interface StateChain {
   entries: StateChainEntry[];
 }
 
+export interface StateChainSummary {
+  digest: string;
+  latestStateHash: string;
+  entryCount: number;
+}
+
 export function compareStateTimestamps(
   first: StateTimestamp,
   second: StateTimestamp,
@@ -156,12 +162,42 @@ export function mergeStateChains(
 }
 
 export function stateChainDigest(chain: StateChain): string {
-  return chain.entries
+  const input = chain.entries
     .map(
       (entry) =>
         `${entry.state.stateHash}@${entry.timestamp.wallTime.toString(36)}.${entry.timestamp.counter.toString(36)}.${entry.timestamp.playerId}`,
     )
     .join("|");
+  let first = 2166136261;
+  let second = 2246822507;
+  for (let index = 0; index < input.length; index += 1) {
+    const code = input.charCodeAt(index);
+    first = Math.imul(first ^ code, 16777619);
+    second = Math.imul(second ^ code, 3266489909);
+  }
+  return `${(first >>> 0).toString(16).padStart(8, "0")}${(second >>> 0)
+    .toString(16)
+    .padStart(8, "0")}`;
+}
+
+export function stateChainSummary(chain: StateChain): StateChainSummary {
+  return {
+    digest: stateChainDigest(chain),
+    latestStateHash: latestStateChainEntry(chain).state.stateHash,
+    entryCount: chain.entries.length,
+  };
+}
+
+export function stateChainMatchesSummary(
+  chain: StateChain,
+  summary: StateChainSummary,
+): boolean {
+  const local = stateChainSummary(chain);
+  return (
+    local.digest === summary.digest &&
+    local.latestStateHash === summary.latestStateHash &&
+    local.entryCount === summary.entryCount
+  );
 }
 
 export function normalizeStateChain(value: unknown): StateChain | null {

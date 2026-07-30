@@ -26,6 +26,13 @@ export type WireMessage =
       chain: StateChain;
     }
   | {
+      type: "chain-summary";
+      sender: string;
+      digest: string;
+      latestStateHash: string;
+      entryCount: number;
+    }
+  | {
       type: "ping";
       sender: string;
       revision: number;
@@ -80,6 +87,19 @@ function isWireMessage(value: unknown): value is WireMessage {
   }
   if (type === "state-request") {
     return isPlayerId((value as { playerId?: unknown }).playerId);
+  }
+  if (type === "chain-summary") {
+    const summary = value as {
+      digest?: unknown;
+      latestStateHash?: unknown;
+      entryCount?: unknown;
+    };
+    return (
+      typeof summary.digest === "string" &&
+      typeof summary.latestStateHash === "string" &&
+      Number.isSafeInteger(summary.entryCount) &&
+      Number(summary.entryCount) > 0
+    );
   }
   return type === "state-chain" || type === "ping";
 }
