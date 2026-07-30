@@ -344,7 +344,9 @@ export class PeerMesh {
           playerId: this.playerId,
           role: "player",
         },
-        serialization: "json",
+        // Recovery chains quickly exceed PeerJS's unchunked JSON-channel
+        // message limit. Binary connections chunk large checkpoints instead.
+        serialization: "binary",
       });
       if (connection) {
         this.attach(connection);
@@ -519,7 +521,9 @@ async function discoverRoomOnce(
             room: cleanRoomCode(roomCode),
             role: "observer",
           },
-          serialization: "json",
+          // Discovery can receive the same full recovery chain as a live
+          // player, so it needs PeerJS's chunked binary transport too.
+          serialization: "binary",
         });
         connections.push(connection);
         connection.on("open", () => {
