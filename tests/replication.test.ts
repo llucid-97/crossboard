@@ -177,6 +177,7 @@ test("connection recovery waits for heartbeats and backs off handshake retries",
     ),
     true,
   );
+  assert.equal(CONNECTION_STALE_AFTER_MS, 90_000);
   assert.deepEqual(PEER_START_RETRY_DELAYS_MS, [
     0,
     500,

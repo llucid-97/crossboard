@@ -81,10 +81,12 @@ schema-v1, schema-v2, and schema-v3 recovery states migrate locally before
 joining it.
 
 Peers exchange compact chain summaries every 1.5 seconds, heartbeat live data
-channels, retire silent links after nine seconds, and keep retrying signalling
-with backoff. Network, focus, and tab-visibility events also trigger an
-immediate reconnect attempt. A temporary signalling outage therefore pauses
-reconnection without discarding either player's local chain.
+channels, retire links that remain silent for ninety seconds, and keep retrying
+signalling with backoff. The longer stale-link window tolerates browser timer
+throttling in background tabs without repeatedly replacing a healthy channel.
+Network, focus, and tab-visibility events also trigger an immediate reconnect
+attempt. A temporary signalling outage therefore pauses reconnection without
+discarding either player's local chain.
 
 If every human closes the room, a player can reopen the locally saved chain on
 the same browser, but a completely different device cannot resurrect it without
