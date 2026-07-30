@@ -86,6 +86,9 @@ signalling with backoff. The longer stale-link window tolerates browser timer
 throttling in background tabs without repeatedly replacing a healthy channel.
 Full recovery chains use PeerJS's chunked binary transport so a growing move
 history cannot exceed the smaller single-message JSON channel limit.
+When a browser refreshes, its stable seat ID opens one fresh channel to every
+seat once; the receiving peers replace any obsolete half-open channel
+immediately instead of waiting for the stale-link timeout.
 Network, focus, and tab-visibility events also trigger an immediate reconnect
 attempt. A temporary signalling outage therefore pauses reconnection without
 discarding either player's local chain.
