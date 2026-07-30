@@ -76,8 +76,15 @@ the tab therefore reclaims the same human seat instead of joining as a new
 player. A new tab receives a separate code so two people can still test or play
 from one browser.
 
-The current room/save protocol is schema v4. Verified schema-v1, schema-v2, and
-schema-v3 recovery states migrate locally before entering the v4 peer mesh.
+The current room/save protocol is schema v4 over the v5 peer mesh. Verified
+schema-v1, schema-v2, and schema-v3 recovery states migrate locally before
+joining it.
+
+Peers exchange compact chain summaries every 1.5 seconds, heartbeat live data
+channels, retire silent links after nine seconds, and keep retrying signalling
+with backoff. Network, focus, and tab-visibility events also trigger an
+immediate reconnect attempt. A temporary signalling outage therefore pauses
+reconnection without discarding either player's local chain.
 
 If every human closes the room, a player can reopen the locally saved chain on
 the same browser, but a completely different device cannot resurrect it without

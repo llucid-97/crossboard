@@ -35,7 +35,12 @@ export type WireMessage =
   | {
       type: "ping";
       sender: string;
-      revision: number;
+      sentAt: number;
+    }
+  | {
+      type: "pong";
+      sender: string;
+      sentAt: number;
     }
   | {
       type: "undo-request";
@@ -53,7 +58,11 @@ export interface MeshCallbacks {
   onNotice: (message: string) => void;
 }
 
-const PEER_PREFIX = "crossboard-v4";
+const PEER_PREFIX = "crossboard-v5";
+export const CONNECTION_STALE_AFTER_MS = 9_000;
+export const PEER_OPEN_TIMEOUT_MS = 6_000;
+export const PEER_START_RETRY_DELAYS_MS = [0, 500, 1_200, 2_500, 5_000] as const;
+export const DISCOVERY_RETRY_DELAYS_MS = [0, 400, 1_000, 2_200] as const;
 
 function cleanRoomCode(roomCode: string): string {
   return roomCode.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -101,13 +110,25 @@ function isWireMessage(value: unknown): value is WireMessage {
       Number(summary.entryCount) > 0
     );
   }
-  return type === "state-chain" || type === "ping";
+  if (type === "ping" || type === "pong") {
+    return Number.isSafeInteger((value as { sentAt?: unknown }).sentAt);
+  }
+  return type === "state-chain";
+}
+
+export function connectionIsStale(
+  lastSeenAt: number,
+  now = Date.now(),
+): boolean {
+  return now - lastSeenAt > CONNECTION_STALE_AFTER_MS;
 }
 
 export class PeerMesh {
   private peer: PeerType | null = null;
   private readonly connections = new Map<string, DataConnection>();
-  private reconnectTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly lastSeenAt = new Map<string, number>();
+  private maintenanceTimer: ReturnType<typeof setInterval> | null = null;
+  private closed = false;
 
   constructor(
     readonly roomCode: string,
@@ -122,46 +143,109 @@ export class PeerMesh {
 
   async start(): Promise<void> {
     const { Peer } = await import("peerjs");
+    this.closed = false;
     this.callbacks.onSignalStatus("connecting");
 
-    await new Promise<void>((resolve, reject) => {
-      const peer = new Peer(this.localPeerId, {
-        debug: 0,
-        pingInterval: 5_000,
-      });
-      this.peer = peer;
+    let lastError: unknown = new Error("Room handshake unavailable");
+    for (
+      let attempt = 0;
+      attempt < PEER_START_RETRY_DELAYS_MS.length;
+      attempt += 1
+    ) {
+      const delay = PEER_START_RETRY_DELAYS_MS[attempt];
+      if (delay) {
+        await new Promise<void>((resolve) =>
+          window.setTimeout(resolve, delay),
+        );
+      }
+      if (this.closed) {
+        throw new Error("Peer mesh closed");
+      }
+      try {
+        await this.openPeer(
+          new Peer(this.localPeerId, {
+            debug: 0,
+            pingInterval: 5_000,
+          }),
+        );
+        return;
+      } catch (error) {
+        lastError = error;
+        const failedPeer = this.peer;
+        this.peer = null;
+        failedPeer?.destroy();
+        if (
+          (error as { type?: string } | null)?.type === "unavailable-id"
+        ) {
+          throw error;
+        }
+        if (attempt < PEER_START_RETRY_DELAYS_MS.length - 1) {
+          this.callbacks.onSignalStatus("degraded");
+          this.callbacks.onNotice(
+            "The room handshake is busy. Retrying automatically…",
+          );
+        }
+      }
+    }
+    throw lastError;
+  }
+
+  private openPeer(peer: PeerType): Promise<void> {
+    this.peer = peer;
+    return new Promise<void>((resolve, reject) => {
       let settled = false;
+      const timeout = window.setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(
+            Object.assign(
+              new Error("Room handshake timed out"),
+              { type: "network" },
+            ),
+          );
+        }
+      }, PEER_OPEN_TIMEOUT_MS);
+
+      peer.on("connection", (connection) => {
+        if (this.peer === peer && !this.closed) {
+          this.attach(connection);
+        } else {
+          connection.close();
+        }
+      });
 
       peer.on("open", () => {
-        settled = true;
+        if (this.peer !== peer || this.closed) {
+          return;
+        }
         this.callbacks.onSignalStatus("online");
-        peer.on("connection", (connection) => this.attach(connection));
-        this.connectToEarlierSeats();
-        this.reconnectTimer = setInterval(() => this.connectToEarlierSeats(), 4_000);
-        resolve();
+        this.ensureMaintenance();
+        this.maintainConnectivity();
+        if (!settled) {
+          settled = true;
+          window.clearTimeout(timeout);
+          resolve();
+        }
       });
 
       peer.on("disconnected", () => {
-        this.callbacks.onSignalStatus("degraded");
-        if (!peer.destroyed) {
-          window.setTimeout(() => {
-            try {
-              if (peer.disconnected) {
-                peer.reconnect();
-              }
-            } catch {
-              this.callbacks.onSignalStatus("offline");
-            }
-          }, 1_000);
+        if (this.peer !== peer || this.closed) {
+          return;
         }
+        this.callbacks.onSignalStatus("degraded");
+        this.ensureMaintenance();
       });
 
       peer.on("error", (error) => {
         if (error.type === "peer-unavailable") {
           return;
         }
+        if (this.peer !== peer || this.closed) {
+          return;
+        }
         if (!settled) {
           settled = true;
+          window.clearTimeout(timeout);
           reject(error);
           return;
         }
@@ -174,9 +258,68 @@ export class PeerMesh {
       });
 
       peer.on("close", () => {
-        this.callbacks.onSignalStatus("offline");
+        if (this.peer === peer && !this.closed) {
+          this.callbacks.onSignalStatus("offline");
+        }
       });
     });
+  }
+
+  private ensureMaintenance(): void {
+    if (this.maintenanceTimer) {
+      return;
+    }
+    this.maintenanceTimer = setInterval(
+      () => this.maintainConnectivity(),
+      1_500,
+    );
+  }
+
+  private maintainConnectivity(): void {
+    if (this.closed) {
+      return;
+    }
+    const peer = this.peer;
+    if (peer?.disconnected && !peer.destroyed) {
+      try {
+        peer.reconnect();
+      } catch {
+        this.callbacks.onSignalStatus("offline");
+      }
+    }
+    if (peer?.open) {
+      this.connectToEarlierSeats();
+    }
+
+    const now = Date.now();
+    let connectionsChanged = false;
+    for (const [peerId, connection] of this.connections) {
+      const lastSeen = this.lastSeenAt.get(peerId) ?? now;
+      if (!connection.open && !connectionIsStale(lastSeen, now)) {
+        continue;
+      }
+      if (!connection.open || connectionIsStale(lastSeen, now)) {
+        connection.close();
+        if (this.connections.get(peerId) === connection) {
+          this.connections.delete(peerId);
+          this.lastSeenAt.delete(peerId);
+          connectionsChanged = true;
+        }
+        continue;
+      }
+      this.sendConnection(connection, {
+        type: "ping",
+        sender: this.localPeerId,
+        sentAt: now,
+      });
+    }
+    if (connectionsChanged) {
+      this.emitConnections();
+    }
+  }
+
+  reconnectNow(): void {
+    this.maintainConnectivity();
   }
 
   private connectToEarlierSeats(): void {
@@ -208,18 +351,20 @@ export class PeerMesh {
 
   private attach(connection: DataConnection): void {
     const current = this.connections.get(connection.peer);
-    if (current && current !== connection && current.open) {
+    if (current && current !== connection) {
       connection.close();
       return;
     }
+    this.connections.set(connection.peer, connection);
+    this.lastSeenAt.set(connection.peer, Date.now());
 
     const register = () => {
       const duplicate = this.connections.get(connection.peer);
-      if (duplicate && duplicate !== connection && duplicate.open) {
+      if (duplicate !== connection) {
         connection.close();
         return;
       }
-      this.connections.set(connection.peer, connection);
+      this.lastSeenAt.set(connection.peer, Date.now());
       this.emitConnections();
       this.sendTo(connection.peer, {
         type: "state-request",
@@ -236,6 +381,18 @@ export class PeerMesh {
 
     connection.on("data", (data) => {
       if (isWireMessage(data)) {
+        this.lastSeenAt.set(connection.peer, Date.now());
+        if (data.type === "ping") {
+          this.sendTo(connection.peer, {
+            type: "pong",
+            sender: this.localPeerId,
+            sentAt: data.sentAt,
+          });
+          return;
+        }
+        if (data.type === "pong") {
+          return;
+        }
         this.callbacks.onMessage(data, connection.peer);
       }
     });
@@ -243,13 +400,16 @@ export class PeerMesh {
     connection.on("close", () => {
       if (this.connections.get(connection.peer) === connection) {
         this.connections.delete(connection.peer);
+        this.lastSeenAt.delete(connection.peer);
         this.emitConnections();
       }
     });
 
     connection.on("error", () => {
+      connection.close();
       if (this.connections.get(connection.peer) === connection) {
         this.connections.delete(connection.peer);
+        this.lastSeenAt.delete(connection.peer);
         this.emitConnections();
       }
     });
@@ -266,36 +426,56 @@ export class PeerMesh {
   sendTo(remotePeerId: string, message: WireMessage): void {
     const connection = this.connections.get(remotePeerId);
     if (connection?.open) {
-      void connection.send(message);
+      this.sendConnection(connection, message);
     }
   }
 
   broadcast(message: WireMessage): void {
     for (const connection of this.connections.values()) {
       if (connection.open) {
-        void connection.send(message);
+        this.sendConnection(connection, message);
+      }
+    }
+  }
+
+  private sendConnection(
+    connection: DataConnection,
+    message: WireMessage,
+  ): void {
+    try {
+      void connection.send(message);
+    } catch {
+      connection.close();
+      if (this.connections.get(connection.peer) === connection) {
+        this.connections.delete(connection.peer);
+        this.lastSeenAt.delete(connection.peer);
+        this.emitConnections();
       }
     }
   }
 
   close(): void {
-    if (this.reconnectTimer) {
-      clearInterval(this.reconnectTimer);
-      this.reconnectTimer = null;
+    this.closed = true;
+    if (this.maintenanceTimer) {
+      clearInterval(this.maintenanceTimer);
+      this.maintenanceTimer = null;
     }
     for (const connection of this.connections.values()) {
       connection.close();
     }
     this.connections.clear();
+    this.lastSeenAt.clear();
     this.peer?.destroy();
     this.peer = null;
   }
 }
 
-export async function discoverRoom(
+class RetryableHandshakeError extends Error {}
+
+async function discoverRoomOnce(
   roomCode: string,
   playerId: PlayerId,
-  timeoutMs = 7_000,
+  timeoutMs: number,
 ): Promise<StateChain> {
   const { Peer } = await import("peerjs");
   return new Promise<StateChain>((resolve, reject) => {
@@ -377,10 +557,44 @@ export async function discoverRoom(
 
     peer.on("error", (error) => {
       if (error.type !== "peer-unavailable") {
-        finish(undefined, new Error("Could not reach the room handshake."));
+        finish(
+          undefined,
+          new RetryableHandshakeError(
+            "Could not reach the room handshake.",
+          ),
+        );
       }
     });
   });
+}
+
+export async function discoverRoom(
+  roomCode: string,
+  playerId: PlayerId,
+  timeoutMs = 7_000,
+): Promise<StateChain> {
+  let lastError: unknown = new Error("Room not found");
+  for (
+    let attempt = 0;
+    attempt < DISCOVERY_RETRY_DELAYS_MS.length;
+    attempt += 1
+  ) {
+    const delay = DISCOVERY_RETRY_DELAYS_MS[attempt];
+    if (delay) {
+      await new Promise<void>((resolve) =>
+        window.setTimeout(resolve, delay),
+      );
+    }
+    try {
+      return await discoverRoomOnce(roomCode, playerId, timeoutMs);
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof RetryableHandshakeError)) {
+        throw error;
+      }
+    }
+  }
+  throw lastError;
 }
 
 export function electCoordinator(

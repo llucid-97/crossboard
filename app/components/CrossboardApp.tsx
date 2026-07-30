@@ -557,7 +557,7 @@ export function CrossboardApp() {
               gameRef.current?.phase !== "finished"
             ) {
               setNotice(
-                "A player disconnected. The room has chosen a new coordinator.",
+                "A player disconnected. The room state is saved and reconnection will keep retrying.",
               );
             }
           },
@@ -614,6 +614,29 @@ export function CrossboardApp() {
     shareSummary();
     const timer = window.setInterval(shareSummary, 1_500);
     return () => window.clearInterval(timer);
+  }, [isNetworked]);
+
+  useEffect(() => {
+    if (!isNetworked) {
+      return;
+    }
+    const reconnect = () => meshRef.current?.reconnectNow();
+    const reconnectWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        reconnect();
+      }
+    };
+    window.addEventListener("online", reconnect);
+    window.addEventListener("focus", reconnect);
+    document.addEventListener("visibilitychange", reconnectWhenVisible);
+    return () => {
+      window.removeEventListener("online", reconnect);
+      window.removeEventListener("focus", reconnect);
+      document.removeEventListener(
+        "visibilitychange",
+        reconnectWhenVisible,
+      );
+    };
   }, [isNetworked]);
 
   useEffect(() => {
@@ -1881,7 +1904,9 @@ export function CrossboardApp() {
                   coordinator disconnects, another connected human takes over.
                   Rejoining players merge every available copy, restore the
                   newest checkpoint, and reclaim their seat with their player
-                  code.
+                  code. Silent links are retired automatically, and every
+                  browser keeps retrying in the background when the network
+                  returns.
                 </p>
               </details>
             ) : null}

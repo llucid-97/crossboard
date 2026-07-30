@@ -9,7 +9,15 @@ import {
   updateLobby,
 } from "../app/game/engine";
 import { formatPlayerId } from "../app/game/identity";
-import { playerSeatFor } from "../app/game/network";
+import {
+  CONNECTION_STALE_AFTER_MS,
+  connectionIsStale,
+  DISCOVERY_RETRY_DELAYS_MS,
+  PEER_OPEN_TIMEOUT_MS,
+  PEER_START_RETRY_DELAYS_MS,
+  playerSeatFor,
+  seatPeerId,
+} from "../app/game/network";
 import {
   appendStateChain,
   createStateChain,
@@ -151,6 +159,39 @@ test("compact summaries detect a peer that missed later checkpoints", () => {
     ),
     true,
   );
+});
+
+test("connection recovery waits for heartbeats and backs off handshake retries", () => {
+  const lastSeenAt = 10_000;
+  assert.equal(
+    connectionIsStale(
+      lastSeenAt,
+      lastSeenAt + CONNECTION_STALE_AFTER_MS,
+    ),
+    false,
+  );
+  assert.equal(
+    connectionIsStale(
+      lastSeenAt,
+      lastSeenAt + CONNECTION_STALE_AFTER_MS + 1,
+    ),
+    true,
+  );
+  assert.deepEqual(PEER_START_RETRY_DELAYS_MS, [
+    0,
+    500,
+    1_200,
+    2_500,
+    5_000,
+  ]);
+  assert.equal(PEER_OPEN_TIMEOUT_MS, 6_000);
+  assert.deepEqual(DISCOVERY_RETRY_DELAYS_MS, [
+    0,
+    400,
+    1_000,
+    2_200,
+  ]);
+  assert.match(seatPeerId("TEST-ROOM", "red"), /^crossboard-v5-/);
 });
 
 test("recovery chains reject a state whose signed fields were changed", () => {

@@ -66,6 +66,8 @@ test("removes the disposable starter and records production metadata", async () 
   assert.match(appSource, /Checking every available recovery chain/);
   assert.match(appSource, /type: "chain-summary"/);
   assert.match(appSource, /setInterval\(shareSummary, 1_500\)/);
+  assert.match(appSource, /visibilitychange/);
+  assert.match(appSource, /reconnectNow/);
   assert.match(replicationSource, /mergeStateChains/);
   assert.match(replicationSource, /MAX_STATE_CHAIN_ENTRIES = 48/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
